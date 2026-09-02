@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"html/template"
 	"io/fs"
 	"log"
 	"net/http"
@@ -101,11 +100,9 @@ func main() {
 	// Parse templates (embedded).
 	subFS, err := fs.Sub(templateFS, "templates")
 	if err != nil { log.Fatalf("template fs: %v", err) }
-	tpls, err := template.New("").ParseFS(subFS, "*.html")
-	if err != nil { log.Fatalf("templates: %v", err) }
-
 	// HTTP mux.
-	h := handler.New(sqlDB, svc, as, tpls)
+	h, err := handler.New(sqlDB, svc, as, subFS)
+	if err != nil { log.Fatalf("templates: %v", err) }
 	mux := http.NewServeMux()
 	h.Register(mux)
 

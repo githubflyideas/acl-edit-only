@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io/fs"
 	"log"
 	"net/http"
 	"strconv"
@@ -33,14 +34,47 @@ type Handler struct {
 	db     *sql.DB
 	svc    *core.Service
 	auths  *auth.Service
-	tpls   *template.Template
+
+	// pages holds one independent template set per page. Every page file
+	// defines a block named "body", so parsing them all into a single set
+	// leaves only the last definition standing and every route renders the
+	// same page.
+	pages map[string]*template.Template
 
 	// dispatchMu ensures only one acl-agent subprocess runs at a time.
 	dispatchMu sync.Mutex
 }
 
-func New(db *sql.DB, svc *core.Service, as *auth.Service, tpls *template.Template) *Handler {
-	return &Handler{db: db, svc: svc, auths: as, tpls: tpls}
+func New(db *sql.DB, svc *core.Service, as *auth.Service, tplFS fs.FS) (*Handler, error) {
+	pages, err := parsePages(tplFS)
+	if err != nil {
+		return nil, err
+	}
+	return &Handler{db: db, svc: svc, auths: as, pages: pages}, nil
+}
+
+// parsePages builds one template set per page file, each carrying its own copy
+// of base.html.
+func parsePages(tplFS fs.FS) (map[string]*template.Template, error) {
+	names, err := fs.Glob(tplFS, "*.html")
+	if err != nil {
+		return nil, err
+	}
+	pages := make(map[string]*template.Template)
+	for _, name := range names {
+		if name == "base.html" {
+			continue
+		}
+		t, err := template.New(name).ParseFS(tplFS, "base.html", name)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", name, err)
+		}
+		pages[name] = t
+	}
+	if len(pages) == 0 {
+		return nil, fmt.Errorf("no page templates found")
+	}
+	return pages, nil
 }
 
 // Register attaches all routes to mux.
@@ -429,7 +463,13 @@ func (h *Handler) requireRole(role string, next http.HandlerFunc) http.HandlerFu
 // ─── Template rendering ───────────────────────────────────────────
 
 func (h *Handler) render(w http.ResponseWriter, r *http.Request, name string, data interface{}) {
-	if err := h.tpls.ExecuteTemplate(w, name, data); err != nil {
+	t, ok := h.pages[name]
+	if !ok {
+		log.Printf("template %s not found", name)
+		http.Error(w, "rendering error", http.StatusInternalServerError)
+		return
+	}
+	if err := t.ExecuteTemplate(w, name, data); err != nil {
 		log.Printf("template %s error: %v", name, err)
 		http.Error(w, "rendering error", http.StatusInternalServerError)
 	}
