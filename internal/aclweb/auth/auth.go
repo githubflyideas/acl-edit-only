@@ -143,9 +143,20 @@ func (s *Service) RevokeUserSessions(userID int64) error {
 }
 
 // ChangePassword updates a user's password and revokes all their sessions.
-func (s *Service) ChangePassword(userID int64, newPassword string) error {
+// ChangePassword replaces a user's password. The current password is required:
+// without it a stolen session cookie is enough to lock the owner out of their
+// own account, and the change also revokes every session, which would hide the
+// takeover behind what looks like an ordinary re-login.
+func (s *Service) ChangePassword(userID int64, oldPassword, newPassword string) error {
 	if len(newPassword) < minPasswordLen {
 		return fmt.Errorf("password must be at least %d characters", minPasswordLen)
+	}
+	var current string
+	if err := s.db.QueryRow(`SELECT password_hash FROM users WHERE id=?`, userID).Scan(&current); err != nil {
+		return fmt.Errorf("current password check failed")
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(current), []byte(oldPassword)); err != nil {
+		return fmt.Errorf("current password is incorrect")
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcryptCost)
 	if err != nil { return err }

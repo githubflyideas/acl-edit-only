@@ -427,9 +427,9 @@ func (h *Handler) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost { http.Error(w, "method not allowed", 405); return }
 	if err := checkCSRF(r); err != nil { http.Error(w, "CSRF", 403); return }
 	actor := r.Context().Value(ctxUser).(*auth.User)
-	_ = r.FormValue("old_password")
+	oldPw := r.FormValue("old_password")
 	newPw := r.FormValue("new_password")
-	if err := h.auths.ChangePassword(actor.ID, newPw); err != nil {
+	if err := h.auths.ChangePassword(actor.ID, oldPw, newPw); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

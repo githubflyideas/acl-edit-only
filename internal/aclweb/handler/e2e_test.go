@@ -391,3 +391,28 @@ func TestDetailPageSurvivesMissingArtifacts(t *testing.T) {
 		t.Errorf("detail page does not identify the request\n%s", snippet([]byte(body)))
 	}
 }
+
+// A stolen session must not be enough to take the account over permanently.
+func TestChangePasswordRequiresTheOldOne(t *testing.T) {
+	h := newHarness(t, e2eRules(2))
+	h.login(t)
+	tok := h.csrf(t)
+
+	resp, err := h.cli.PostForm(h.srv.URL+"/admin/password", url.Values{
+		"csrf_token":   {tok},
+		"old_password": {"definitely-not-the-current-password"},
+		"new_password": {"attacker-chosen-password"},
+	})
+	if err != nil { t.Fatal(err) }
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("password change with a wrong old password = %d, want 400\n%s",
+			resp.StatusCode, snippet(body))
+	}
+
+	// The original password must still work.
+	jar, _ := cookiejar.New(nil)
+	h.cli.Jar = jar
+	h.login(t)
+}
