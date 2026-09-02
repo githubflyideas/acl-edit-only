@@ -72,12 +72,15 @@ cat > /etc/aclweb/config.json << 'CONF'
   "range_min": 2000,
   "range_max": 4999,
   "alloc_max": 4900,
+  "rule_comment": false,
   "reconcile_interval_min": 60
 }
 CONF
 ```
 
 `acl` / `range_min` / `range_max` / `alloc_max` 必须与 acl-agent 配置一致。
+
+`rule_comment` 决定要不要在每条规则下面再写一行 `rule <N> comment ACLSYS-REQ-<code>-<8hex>`。默认 `false`，一次审批只往交换机上加一行。改成 `true` 的唯一好处是有人直接看 `display acl` 时能分辨哪些规则是本工具建的；对账不依赖它，对账是拿数据库里记录的 rule ID 去快照里查。
 
 不需要 TLS（内网）：去掉 `tls_cert` 和 `tls_key`，改用明文 HTTP。
 
@@ -148,13 +151,12 @@ journalctl -u aclweb | grep "INITIAL ADMIN"
 /usr/local/bin/aclagent snapshot -config /etc/aclagent/config.json -stream
 ```
 
-`-stream` 会把整个 telnet 会话逐行打到 stderr，标准输出是一份 JSON 结果。请确认三件事：
+`-stream` 会把整个 telnet 会话逐行打到 stderr，标准输出是一份 JSON 结果。请确认两件事：
 
 1. 登录后的提示符被正确识别（会话没有卡在读取上，也没有超时）
 2. `display acl <N>` 的输出完整——最后一条 rule 之后紧跟提示符，中间的 `---- More ----` 分页都被翻完了
-3. 每条 rule 下面是否跟着一行 `rule <N> comment ...`
 
-第 3 点最要紧。系统靠 `ACLSYS-REQ-<code>-<8hex>` 注释区分"自己建的规则"和"人手工建的规则"，对账（reconcile）完全依赖注释出现在 `display acl` 输出里。如果真机不显示 comment，对账需要改成读 `display current-configuration | include "acl advanced"`，请把实际输出贴回来。
+第 2 点是有实际后果的那个：规则 ID 按快照里的最大值 +1 分配，读漏了尾部就会分到一个正在生效的 ID 上。写入前的同会话 guard 会拦住这种情况（目标 ID 已存在就中止），所以后果是执行失败而不是覆盖，但值得一次就确认清楚。
 
 跑完后 `journalctl` 或终端里那段会话原文本身就是最有价值的东西：目前的自动化测试跑在一台仿真设备上，它的提示符和分页行为是照 H3C 文档写的，不是照真机抓的。
 
@@ -165,7 +167,7 @@ journalctl -u aclweb | grep "INITIAL ADMIN"
 - 口令是 base64 编码，安全性依赖文件权限 `0400`
 - `acl-agent` 只在 Linux 上启动
 - `save` 失败不自动回滚，报 `save_failed` 由人决定
-- 每条规则带 `ACLSYS-REQ-<code>-<8hex>` 注释，用于对账
+- `comment` 失败必须回滚整条规则（仅在 `rule_comment` 打开时有这一步）
 
 ---
 
