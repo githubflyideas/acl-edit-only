@@ -509,7 +509,7 @@ func (s *Service) runAgentStream(ctx context.Context, w io.Writer, subcmd string
 		args = append(args, "--stream")
 	}
 	args = append(args, extraArgs...)
-	cmd := exec.CommandContext(tctx, "sudo", args...)
+	cmd := exec.CommandContext(tctx, args[0], args[1:]...)
 	if w != nil {
 		cmd.Stderr = w
 	}
