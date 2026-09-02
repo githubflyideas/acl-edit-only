@@ -33,8 +33,8 @@ cat > /etc/aclagent/config.json << 'CONF'
   "plan_dir":     "/var/lib/aclagent/plans",
   "state_file":   "/var/lib/aclagent/state.json",
   "daily_limit":  50,
-  "connect_timeout_secs": 10,
-  "read_timeout_secs":    15
+  "connect_timeout_s": 10,
+  "read_timeout_s":    15
 }
 CONF
 chmod 400 /etc/aclagent/config.json
@@ -137,6 +137,26 @@ journalctl -u aclweb | grep "INITIAL ADMIN"
 5. 成功 → `active`；失败自动回滚 → `dispatch_failed`；回滚也失败 → `inconsistent`（需人工介入）
 
 删除规则走同样的流程（在 active 规则详情页申请删除）。
+
+---
+
+## 对真机做只读验证
+
+在把 Web 端接到生产交换机之前，先用 agent 的 `snapshot` 子命令验证一遍。它只登录、只执行 `display acl`，不写任何配置：
+
+```bash
+/usr/local/bin/aclagent snapshot -config /etc/aclagent/config.json -stream
+```
+
+`-stream` 会把整个 telnet 会话逐行打到 stderr，标准输出是一份 JSON 结果。请确认三件事：
+
+1. 登录后的提示符被正确识别（会话没有卡在读取上，也没有超时）
+2. `display acl <N>` 的输出完整——最后一条 rule 之后紧跟提示符，中间的 `---- More ----` 分页都被翻完了
+3. 每条 rule 下面是否跟着一行 `rule <N> comment ...`
+
+第 3 点最要紧。系统靠 `ACLSYS-REQ-<code>-<8hex>` 注释区分"自己建的规则"和"人手工建的规则"，对账（reconcile）完全依赖注释出现在 `display acl` 输出里。如果真机不显示 comment，对账需要改成读 `display current-configuration | include "acl advanced"`，请把实际输出贴回来。
+
+跑完后 `journalctl` 或终端里那段会话原文本身就是最有价值的东西：目前的自动化测试跑在一台仿真设备上，它的提示符和分页行为是照 H3C 文档写的，不是照真机抓的。
 
 ---
 
