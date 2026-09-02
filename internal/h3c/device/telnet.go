@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -38,7 +39,29 @@ func (t *TelnetTransport) Send(_ context.Context, data []byte) error {
 	return err
 }
 
+func (t *TelnetTransport) ReadUntilRe(_ context.Context, res []*regexp.Regexp, deadline time.Time) (string, int, error) {
+	return t.readUntil(deadline, func(out string) int {
+		for i, re := range res {
+			if re.MatchString(out) {
+				return i
+			}
+		}
+		return -1
+	})
+}
+
 func (t *TelnetTransport) ReadUntil(_ context.Context, patterns []string, deadline time.Time) (string, int, error) {
+	return t.readUntil(deadline, func(out string) int {
+		for i, p := range patterns {
+			if strings.Contains(out, p) {
+				return i
+			}
+		}
+		return -1
+	})
+}
+
+func (t *TelnetTransport) readUntil(deadline time.Time, match func(string) int) (string, int, error) {
 	if err := t.conn.SetReadDeadline(deadline); err != nil {
 		return "", -1, fmt.Errorf("set deadline: %w", err)
 	}
@@ -51,10 +74,8 @@ func (t *TelnetTransport) ReadUntil(_ context.Context, patterns []string, deadli
 		if n > 0 {
 			buf.Write(t.iacState.strip(raw[:n], t.conn))
 			out := buf.String()
-			for i, p := range patterns {
-				if strings.Contains(out, p) {
-					return out, i, nil
-				}
+			if i := match(out); i >= 0 {
+				return out, i, nil
 			}
 		}
 		if err != nil {

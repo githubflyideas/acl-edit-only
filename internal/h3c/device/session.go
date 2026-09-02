@@ -18,7 +18,19 @@ const (
 	promptSaveCFM  = "Y/N"
 )
 
-var moreLineRe = regexp.MustCompile(`(?m)\r?[ \t]*---- More ----[^\n]*`)
+// rePrompt matches a device prompt that sits at the very end of the output.
+// Requiring end-of-text is what makes reads safe against rule comments that
+// happen to contain ">" or "]": those appear mid-line, never as the tail.
+var rePrompt = regexp.MustCompile(`(?:^|\n)(?:<[^<>\n]{1,64}>|\[[^\[\]\n]{1,64}\])[ \t\r\x00]*\z`)
+
+// reMore matches the paging marker. Devices pad it differently, so the spacing
+// is deliberately loose.
+var reMore = regexp.MustCompile(`----\s*More\s*----`)
+
+var reSuccess = regexp.MustCompile(`(?i)success`)
+var reSaveCFM = regexp.MustCompile(`\[Y/N\]|\(Y/N\)|Y/N`)
+
+var moreLineRe = regexp.MustCompile(`(?m)[ \t]*----\s*More\s*----[^\n]*`)
 
 var errorPatterns = []string{
 	"Error:", "% Error", "% Unrecognized command",
@@ -74,36 +86,58 @@ func (s *Session) Open(ctx context.Context) error {
 }
 
 func (s *Session) DisplayACL(ctx context.Context) (string, error) {
-	// Send the display command; collect output across multiple pages.
 	if err := s.send(ctx, fmt.Sprintf("display acl %d\r\n", s.aclNum)); err != nil {
 		return "", &SessionError{Stage: "view", Cause: err}
 	}
+	// reMore is tested before rePrompt: a page that ends in the paging marker
+	// must never be mistaken for the end of the output, or the tail of the ACL
+	// is lost silently and rule-ID allocation reuses a live ID.
+	pats := []*regexp.Regexp{reMore, rePrompt}
 	var full strings.Builder
-	prompts := []string{promptUserView, promptSysView, promptMore}
-	for {
-		out, idx, err := s.tr.ReadUntil(ctx, prompts, time.Now().Add(s.timeout))
-		if !s.inAuth {
-			s.rawBuf.WriteString(out)
-			if s.stream != nil { s.stream.Write([]byte(out)) }
+	for pages := 0; ; pages++ {
+		if pages > maxPages {
+			return full.String(), &SessionError{Stage: "view",
+				Cause: fmt.Errorf("output did not end after %d pages", maxPages)}
 		}
-		if err != nil { return full.String(), &SessionError{Stage: "view", Cause: err} }
-		// Strip the "---- More ----" line (device overwrites it with \r but keep text clean).
-		page := moreLineRe.ReplaceAllString(out, "")
-		full.WriteString(page)
-		if idx < 2 {
-			// Reached a normal prompt — done.
+		out, idx, err := s.readUntilRe(ctx, pats)
+		full.WriteString(out)
+		if err != nil {
+			return full.String(), err
+		}
+		if idx == 1 {
 			break
 		}
-		// idx == 2: hit "---- More ----", send space to continue.
 		if err := s.tr.Send(ctx, []byte{' '}); err != nil {
 			return full.String(), &SessionError{Stage: "view", Cause: err}
 		}
 	}
-	result := full.String()
+	result := normalizeTerminal(full.String())
 	if err := checkDeviceErrors(result); err != nil {
 		return result, &SessionError{Stage: "view", Cause: err}
 	}
 	return result, nil
+}
+
+// maxPages bounds the paging loop so a device that keeps answering with the
+// paging marker cannot spin forever. 4000 pages is far more than the largest
+// possible ACL and small enough to fail in bounded time.
+const maxPages = 4000
+
+// normalizeTerminal replays carriage returns the way a terminal would: within
+// a line, anything before the last CR has been overwritten on screen and is
+// therefore not part of the text. This is what erases the "---- More ----"
+// marker along with the spaces the device paints over it.
+func normalizeTerminal(raw string) string {
+	lines := strings.Split(raw, "\n")
+	for i, l := range lines {
+		// The CR that terminates the line is punctuation, not an overwrite.
+		l = strings.TrimSuffix(l, "\r")
+		if idx := strings.LastIndex(l, "\r"); idx >= 0 {
+			l = l[idx+1:]
+		}
+		lines[i] = moreLineRe.ReplaceAllString(l, "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (s *Session) EnterSystemView(ctx context.Context) error {
@@ -163,6 +197,19 @@ func (s *Session) Close(ctx context.Context) {
 
 func (s *Session) RawOutput() string { return s.rawBuf.String() }
 
+// TryExec runs a command whose failure is acceptable. The output is still
+// recorded and the prompt is still consumed, so the session stays in sync.
+func (s *Session) TryExec(ctx context.Context, cmd string, waitFor ...string) error {
+	if err := s.send(ctx, cmd+"\r\n"); err != nil {
+		return &SessionError{Stage: "write", Cause: err}
+	}
+	out, _, err := s.readUntil(ctx, waitFor)
+	if err != nil {
+		return err
+	}
+	return checkDeviceErrors(out)
+}
+
 func (s *Session) Exec(ctx context.Context, cmd string, waitFor ...string) error {
 	_, err := s.ExecOutput(ctx, cmd, waitFor...)
 	return err
@@ -182,12 +229,30 @@ func (s *Session) ExecOutput(ctx context.Context, cmd string, waitFor ...string)
 
 func (s *Session) send(ctx context.Context, txt string) error { return s.tr.Send(ctx, []byte(txt)) }
 
+func (s *Session) readUntilRe(ctx context.Context, res []*regexp.Regexp) (string, int, error) {
+	out, idx, err := s.tr.ReadUntilRe(ctx, res, time.Now().Add(s.timeout))
+	s.record(out)
+	if err != nil {
+		return out, idx, &SessionError{Stage: "view", Cause: err}
+	}
+	return out, idx, nil
+}
+
+// record mirrors device output into the transcript and the live stream. The
+// auth phase is excluded so the password never reaches either.
+func (s *Session) record(out string) {
+	if s.inAuth {
+		return
+	}
+	s.rawBuf.WriteString(out)
+	if s.stream != nil {
+		s.stream.Write([]byte(out)) //nolint:errcheck
+	}
+}
+
 func (s *Session) readUntil(ctx context.Context, patterns []string) (string, int, error) {
 	out, idx, err := s.tr.ReadUntil(ctx, patterns, time.Now().Add(s.timeout))
-	if !s.inAuth {
-		s.rawBuf.WriteString(out)
-		if s.stream != nil { s.stream.Write([]byte(out)) }
-	}
+	s.record(out)
 	if err != nil { return out, idx, &SessionError{Stage: "view", Cause: err} }
 	return out, idx, nil
 }
@@ -195,16 +260,22 @@ func (s *Session) readUntil(ctx context.Context, patterns []string) (string, int
 func checkDeviceErrors(out string) error {
 	for _, p := range errorPatterns {
 		if strings.Contains(out, p) {
-			return fmt.Errorf("device error: %s", lastLine(out))
+			return fmt.Errorf("device error: %s", offendingLine(out, p))
 		}
 	}
 	return nil
 }
 
-func lastLine(s string) string {
-	lines := strings.Split(strings.TrimRight(s, "\r\n"), "\n")
-	if len(lines) == 0 { return s }
-	return strings.TrimSpace(lines[len(lines)-1])
+// offendingLine returns the line that carries the error text. Reporting the
+// last line instead would report the prompt, which says nothing about what
+// went wrong.
+func offendingLine(out, pattern string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, pattern) {
+			return strings.TrimSpace(line)
+		}
+	}
+	return strings.TrimSpace(out)
 }
 
 type SessionError struct{ Stage string; Cause error }

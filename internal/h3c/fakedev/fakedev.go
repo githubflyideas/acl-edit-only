@@ -1,0 +1,107 @@
+// Package fakedev implements a fake H3C switch that speaks telnet, for tests.
+//
+// It is deliberately picky in the same ways a real device is: it negotiates
+// telnet options, echoes commands, pages long output with "---- More ----"
+// until screen-length is disabled, rejects unknown commands with the H3C
+// error format, and changes its prompt with the view.
+package fakedev
+
+import (
+	"net"
+	"sort"
+	"sync"
+)
+
+const (
+	iac  = 0xFF
+	will = 0xFB
+	wont = 0xFC
+	do   = 0xFD
+	dont = 0xFE
+)
+
+// Rule is one ACL entry as the device stores it.
+type Rule struct {
+	ID      int
+	Body    string // e.g. "permit tcp destination 10.1.1.1 0 destination-port eq 443"
+	Comment string
+}
+
+// Device is a fake H3C switch.
+type Device struct {
+	mu       sync.Mutex
+	Hostname string
+	ACL      int
+	Username string
+	Password string
+	rules    map[int]*Rule
+	Saved    bool
+	SaveFail bool // when true, "save" reports failure
+	CmdLog   []string
+
+	// PageLines is how many body lines fit on one screen before "---- More ----".
+	PageLines int
+
+	// NoScreenLength makes the device reject "screen-length disable", the way
+	// some H3C models and restricted privilege levels do.
+	NoScreenLength bool
+
+	ln net.Listener
+}
+
+// New returns a device preloaded with the given rules.
+func New(hostname string, aclNum int, user, pass string, rules []Rule) *Device {
+	d := &Device{
+		Hostname:  hostname,
+		ACL:       aclNum,
+		Username:  user,
+		Password:  pass,
+		rules:     map[int]*Rule{},
+		PageLines: 24,
+	}
+	for i := range rules {
+		r := rules[i]
+		d.rules[r.ID] = &r
+	}
+	return d
+}
+
+// Start listens on 127.0.0.1 and returns the address.
+func (d *Device) Start() (string, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	d.ln = ln
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go d.serve(c)
+		}
+	}()
+	return ln.Addr().String(), nil
+}
+
+func (d *Device) Close() { if d.ln != nil { d.ln.Close() } }
+
+// Rules returns a snapshot copy, sorted by ID.
+func (d *Device) Rules() []Rule {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var ids []int
+	for id := range d.rules { ids = append(ids, id) }
+	sort.Ints(ids)
+	out := make([]Rule, 0, len(ids))
+	for _, id := range ids { out = append(out, *d.rules[id]) }
+	return out
+}
+
+// Commands returns every command line the device received.
+func (d *Device) Commands() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.CmdLog...)
+}

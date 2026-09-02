@@ -13,11 +13,13 @@ import (
 
 var ruleCountRe = regexp.MustCompile(`(\d+)\s+rules?`)
 
+// Snapshot reads the whole ACL. Turning paging off is only an optimisation:
+// some models and privilege levels reject "screen-length disable", and a
+// device we cannot read is worse than one we have to page through, so the
+// error is deliberately ignored and DisplayACL drives paging either way.
 func Snapshot(ctx context.Context, s *Session) (string, error) {
-	if err := s.Exec(ctx, "screen-length disable", promptUserView, promptSysView); err != nil {
-		return "", err
-	}
-	return s.ExecOutput(ctx, fmt.Sprintf("display acl %d", s.aclNum), promptUserView, promptSysView)
+	_ = s.TryExec(ctx, "screen-length disable", promptUserView, promptSysView)
+	return s.DisplayACL(ctx)
 }
 
 func HeaderCount(displayOut string) int {
