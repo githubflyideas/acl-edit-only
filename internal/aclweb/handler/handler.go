@@ -112,6 +112,15 @@ func (h *Handler) Register(mux *http.ServeMux) {
 
 // ─── Auth handlers ───────────────────────────────────────────────
 
+// isTLS reports whether the request reached us over HTTPS, either directly or
+// through a reverse proxy that says so.
+func isTLS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
 func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		h.render(w, r, "login.html", map[string]interface{}{
@@ -142,7 +151,10 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    sessionToken,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   true,
+		// Secure only under TLS. Setting it unconditionally means the browser
+		// never returns the cookie on the plain-HTTP deployment the README
+		// documents, and every login silently bounces back to the login page.
+		Secure:   isTLS(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int((8 * time.Hour).Seconds()),
 	})
