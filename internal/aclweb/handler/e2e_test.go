@@ -364,3 +364,30 @@ func TestUnauthenticatedAccessIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// A request whose artifacts row is missing must still be viewable: the detail
+// page is the only place the operator can see what happened to it.
+func TestDetailPageSurvivesMissingArtifacts(t *testing.T) {
+	h := newHarness(t, e2eRules(2))
+	h.login(t)
+	var uid int64
+	if err := h.db.QueryRow(`SELECT id FROM users WHERE username='admin'`).Scan(&uid); err != nil {
+		t.Fatal(err)
+	}
+	res, err := h.db.Exec(`
+		INSERT INTO change_requests(request_code, action, requester_id, state, reason,
+			protocol, src_ip, src_wildcard, src_port_op, src_port_val,
+			dst_ip, dst_wildcard, dst_port_op, dst_port_val, rule_id)
+		VALUES('REQ-19700101-9999','add_rule',?,'dispatch_failed','historical row',
+			'tcp','','','',0,'10.0.0.9','0.0.0.0','eq',443,150)`, uid)
+	if err != nil { t.Fatal(err) }
+	id, _ := res.LastInsertId()
+
+	code, body := h.get(t, fmt.Sprintf("/requests/%d", id))
+	if code != http.StatusOK {
+		t.Fatalf("GET detail of a request without artifacts = %d, want 200", code)
+	}
+	if !strings.Contains(body, "REQ-19700101-9999") {
+		t.Errorf("detail page does not identify the request\n%s", snippet([]byte(body)))
+	}
+}

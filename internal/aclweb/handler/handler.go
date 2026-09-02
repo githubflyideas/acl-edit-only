@@ -283,6 +283,12 @@ func (h *Handler) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
 	var approver sql.NullString
 	var approveComment sql.NullString
 	var ruleID sql.NullInt64
+	// The artifacts are LEFT JOINed, so all three columns are NULL for a
+	// request that has none — a request that failed before the artifact chain
+	// was written, or one restored from an older database. Scanning those into
+	// plain strings fails, and the failure used to be reported as 404, hiding
+	// the one page that would explain what happened.
+	var diffText, planJSON, planSHA sql.NullString
 	err = h.db.QueryRowContext(r.Context(), `
 		SELECT cr.id, cr.request_code, cr.action, cr.state, cr.reason,
 		       cr.protocol, cr.src_ip, cr.dst_ip,
@@ -299,9 +305,20 @@ func (h *Handler) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
 		&d.Protocol, &d.SrcIP, &d.DstIP,
 		&d.SrcPortOp, &d.SrcPortVal, &d.DstPortOp, &d.DstPortVal,
 		&d.Requester, &approver, &approveComment, &ruleID, &d.CreatedAt,
-		&d.DiffText, &d.PlanJSON, &d.PlanSHA256,
+		&diffText, &planJSON, &planSHA,
 	)
-	if err != nil { http.NotFound(w, r); return }
+	if err == sql.ErrNoRows {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		log.Printf("request detail %d: %v", id, err)
+		http.Error(w, "database error", http.StatusInternalServerError)
+		return
+	}
+	d.DiffText = diffText.String
+	d.PlanJSON = planJSON.String
+	d.PlanSHA256 = planSHA.String
 	if approver.Valid { d.Approver = approver.String }
 	if approveComment.Valid { d.ApproveComment = approveComment.String }
 	if ruleID.Valid { d.RuleID = ruleID.Int64 }
