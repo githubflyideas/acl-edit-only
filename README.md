@@ -1,10 +1,12 @@
 # acl-edit-only
 
-H3C 交换机 ACL 审批系统。两进程架构：`aclweb`（Web/DB/审批）永远不持有设备口令；`acl-agent`（telnet/口令）每次执行几秒后退出，不接受网络连接。
+H3C 交换机 ACL 审批系统。两进程架构：`aclweb`（Web/DB/审批）永远不持有设备口令；`acl-agent`（telnet/口令）每次执行几秒后退出。
+
+单人操作模式：提交申请 → 看 diff → 确认执行 → 实时看终端输出。
 
 ---
 
-## 架构概览
+## 架构
 
 ```
 浏览器 ─→ aclweb (HTTP, SQLite) ─→ sudo acl-agent apply
@@ -12,38 +14,41 @@ H3C 交换机 ACL 审批系统。两进程架构：`aclweb`（Web/DB/审批）�
                                     telnet 交换机
 ```
 
-- `aclweb`：常驻进程，管理用户、审批流、计划文件、日志
-- `acl-agent`：短生命周期子进程，唯一持有交换机口令，只接受四条操作：`snapshot / apply / delete / rollback`
+`aclweb` 常驻，没有设备口令。`acl-agent` 短生命周期，唯一持有口令，只做四件事：`snapshot / apply / delete / rollback`。
 
 ---
 
-## 快速部署
+## 部署
 
-### 1. 准备两个 Linux 用户
-
-```bash
-useradd -r -s /sbin/nologin aclweb
-useradd -r -s /sbin/nologin aclagent
-```
-
-### 2. 放置二进制
+### 1. 放置二进制
 
 ```bash
 cp dist/aclweb-linux-amd64   /usr/local/bin/aclweb
 cp dist/aclagent-linux-amd64 /usr/local/bin/aclagent
-chown root:root /usr/local/bin/aclweb /usr/local/bin/aclagent
-chmod 755 /usr/local/bin/aclweb
-chmod 755 /usr/local/bin/aclagent
+chmod 755 /usr/local/bin/aclweb /usr/local/bin/aclagent
 ```
 
-### 3. 准备 acl-agent 的目录和配置
+如果想把口令和 web 进程隔离开（推荐），建两个用户并配 sudo：
+
+```bash
+useradd -r -s /sbin/nologin aclweb
+useradd -r -s /sbin/nologin aclagent
+
+# sudo 精确授权：aclweb 只能以 aclagent 身份运行这一个二进制
+echo 'aclweb ALL=(aclagent) NOPASSWD: /usr/local/bin/aclagent' \
+  > /etc/sudoers.d/aclagent
+chmod 440 /etc/sudoers.d/aclagent
+visudo -c
+```
+
+不想搞两用户也行，用同一个用户跑 `aclweb` 和 `aclagent`，把 `agent_bin` 设成完整路径，`sudo` 那行去掉。
+
+### 2. acl-agent 配置
 
 ```bash
 mkdir -p /etc/aclagent /var/lib/aclagent/plans
-chown aclagent:aclagent /etc/aclagent /var/lib/aclagent
 chmod 700 /etc/aclagent
 
-# 配置文件
 cat > /etc/aclagent/config.json << 'CONF'
 {
   "acl":          3977,
@@ -59,32 +64,28 @@ cat > /etc/aclagent/config.json << 'CONF'
   "read_timeout_secs":    15
 }
 CONF
-chown aclagent:aclagent /etc/aclagent/config.json
 chmod 400 /etc/aclagent/config.json
 
 # 口令文件：第一行用户名，第二行口令的 base64
 printf 'admin\n' > /etc/aclagent/credential
 printf 'yourpassword' | base64 >> /etc/aclagent/credential
-chown aclagent:aclagent /etc/aclagent/credential
 chmod 400 /etc/aclagent/credential
 ```
 
-### 4. sudo 精确授权（内核强制边界）
+配置字段说明：
 
-```bash
-cat > /etc/sudoers.d/aclagent << 'SUDO'
-# aclweb 只能以 aclagent 身份运行这一个二进制，不带任何其他命令
-aclweb ALL=(aclagent) NOPASSWD: /usr/local/bin/aclagent
-SUDO
-chmod 440 /etc/sudoers.d/aclagent
-visudo -c   # 验证语法
-```
+| 字段 | 说明 |
+|---|---|
+| `acl` | 目标 ACL 编号（如 3977） |
+| `range_min` / `range_max` | rule ID 合法范围 |
+| `alloc_max` | 自动分配的上限（≤ range_max，可留出保留区） |
+| `daily_limit` | 每日 apply 次数上限 |
+| `device_addr` | 交换机 IP:端口（telnet，通常 23） |
 
-### 5. 准备 aclweb 配置
+### 3. aclweb 配置
 
 ```bash
 mkdir -p /etc/aclweb /var/lib/aclweb
-chown aclweb:aclweb /etc/aclweb /var/lib/aclweb
 
 cat > /etc/aclweb/config.json << 'CONF'
 {
@@ -103,32 +104,36 @@ cat > /etc/aclweb/config.json << 'CONF'
   "reconcile_interval_min": 60
 }
 CONF
-chown aclweb:aclweb /etc/aclweb/config.json
-chmod 600 /etc/aclweb/config.json
 ```
 
-TLS 证书自签名示例：
+`acl` / `range_min` / `range_max` / `alloc_max` 必须与 acl-agent 配置一致，aclweb 会在每次下发后比对 agent 的自报告值，不一致时拒绝。
+
+不需要 TLS 的话（内网 + 前面有反代），去掉 `tls_cert` 和 `tls_key`，aclweb 会用明文 HTTP 启动。
+
+自签名证书：
 
 ```bash
 openssl req -x509 -newkey rsa:4096 -keyout /etc/aclweb/key.pem \
-  -out /etc/aclweb/cert.pem -days 365 -nodes \
-  -subj "/CN=aclweb"
-chown aclweb:aclweb /etc/aclweb/cert.pem /etc/aclweb/key.pem
+  -out /etc/aclweb/cert.pem -days 365 -nodes -subj "/CN=aclweb"
 chmod 600 /etc/aclweb/key.pem
 ```
 
-### 6. plan_dir 权限
-
-`aclweb` 写计划文件，`aclagent` 读计划文件，两个用户都需要访问：
+### 4. plan_dir 权限（两用户方案）
 
 ```bash
 chown aclweb:aclagent /var/lib/aclagent/plans
 chmod 750 /var/lib/aclagent/plans
 ```
 
-### 7. 启动（systemd）
+### 5. 启动
 
-`/etc/systemd/system/aclweb.service`：
+手动：
+
+```bash
+/usr/local/bin/aclweb -config /etc/aclweb/config.json
+```
+
+systemd：
 
 ```ini
 [Unit]
@@ -139,92 +144,53 @@ After=network.target
 User=aclweb
 ExecStart=/usr/local/bin/aclweb -config /etc/aclweb/config.json
 Restart=on-failure
-RestartSec=5
-NoNewPrivileges=true
-ProtectSystem=strict
-ReadWritePaths=/var/lib/aclweb /var/lib/aclagent/plans
 
 [Install]
 WantedBy=multi-user.target
-```
-
-```bash
-systemctl daemon-reload
-systemctl enable --now aclweb
 ```
 
 ---
 
 ## 首次登录
 
-服务启动时如果数据库里没有用户，会自动创建 `admin` 账号并把随机密码打到日志里：
+启动时若数据库没有用户，自动创建 `admin` 并把随机密码打到日志：
 
 ```
 INITIAL ADMIN CREATED — username: admin  password: Xk9mP2...
-Change this password immediately after first login.
 ```
 
 ```bash
 journalctl -u aclweb | grep "INITIAL ADMIN"
 ```
 
-浏览器访问 `https://<host>:8443`，用上面的密码登录后立即改密。
-
----
-
-## 用户角色
-
-| 角色 | 提交申请 | 审批/拒绝 | 下发执行 | 用户管理 |
-|---|:---:|:---:|:---:|:---:|
-| admin | ✓ | ✓ | ✓ | ✓ |
-| approver | ✓ | ✓ | — | — |
-| operator | ✓ | — | ✓ | — |
-| viewer | — | — | — | — |
-
-四眼原则：审批人不能是申请人本人。
+访问 `https://<host>:8443`，登录后立即改密。
 
 ---
 
 ## 操作流程
 
-```
-申请人提交  →  快照设备  →  分配 rule ID  →  生成 diff  →  pending
-     ↓
-审批人看 diff  →  通过 / 拒绝
-     ↓（通过）
-操作员下发  →  再次快照（漂移检测）→  调用 acl-agent apply  →  回读验证
-     ↓
-active（成功）/ dispatch_failed（失败+已回滚）/ inconsistent（需人工介入）
-```
+1. **提交申请** — 填写目的 IP、端口、协议、原因
+2. **看 diff** — 系统自动从设备抓快照，生成预期变更的 unified diff
+3. **确认执行** — 核对 diff 无误后点击，页面展开终端窗口，实时显示 telnet 连接、命令发送、设备回显的完整过程
+4. **自动验证** — 执行完成后系统回读设备，断言规则条数 +1、新规则存在、其余规则未变
+5. 成功 → `active`；失败 → 自动回滚 → `dispatch_failed`；回滚也失败 → `inconsistent`（需人工介入）
 
----
-
-## acl-agent 直接调用（调试用）
-
-> 正常情况下由 aclweb 通过 sudo 调用，无需手动操作。
-
-```bash
-# 抓一份快照
-sudo -u aclagent /usr/local/bin/aclagent snapshot \
-  --config /etc/aclagent/config.json
-
-# 查看帮助
-/usr/local/bin/aclagent --help
-```
+删除规则走同样的流程（在 active 规则详情页申请删除）。
 
 ---
 
 ## 安全说明
 
-- 口令是 base64 编码（不是加密）；安全性依赖文件权限 0400 + 属主 `aclagent`
-- `acl-agent` 只在 Linux 上运行（依赖 POSIX 权限检查）
-- 分页（`---- More ----`）时硬失败，不翻页，防止静默丢行
+- 口令是 base64 编码（不是加密），安全性完全依赖文件权限 `0400` 和属主
+- `acl-agent` 只在 Linux 上启动，其他平台直接拒绝
+- 遇到分页（`---- More ----`）硬失败，不翻页，防止静默丢行
 - `save` 失败不自动回滚，报 `save_failed` 由人决定
-- 每条已下发的规则带 `ACLSYS-REQ-<code>-<8hex>` 注释，用于对账
+- 每条规则带 `ACLSYS-REQ-<code>-<8hex>` 注释，用于对账
+- 每次执行后 aclweb 比对 acl-agent 自报告的绑定值（ACL 号、号段），不一致拒绝
 
 ---
 
-## 构建
+## 从源码构建
 
 ```bash
 git clone https://github.com/githubflyideas/acl-edit-only
