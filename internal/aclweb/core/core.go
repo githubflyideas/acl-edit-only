@@ -76,6 +76,27 @@ type SubmitRequest struct {
 	Reason      string
 }
 
+// normalize fills in what the form cannot express. The source box on the new
+// request page is a bare IP with no wildcard field beside it, so an empty
+// wildcard means a single host; left as-is it reaches the validator as "" and
+// every request naming a source is rejected.
+func (r *SubmitRequest) normalize() {
+	r.Protocol = strings.ToLower(strings.TrimSpace(r.Protocol))
+	r.SrcIP = strings.TrimSpace(r.SrcIP)
+	r.DstIP = strings.TrimSpace(r.DstIP)
+	r.SrcWildcard = strings.TrimSpace(r.SrcWildcard)
+	r.DstWildcard = strings.TrimSpace(r.DstWildcard)
+	if r.SrcIP != "" && r.SrcWildcard == "" {
+		r.SrcWildcard = hostWildcard
+	}
+	if r.DstIP != "" && r.DstWildcard == "" {
+		r.DstWildcard = hostWildcard
+	}
+}
+
+// hostWildcard is the H3C wildcard for a single address.
+const hostWildcard = "0.0.0.0"
+
 // Submit validates, snapshots, allocates a rule ID, builds the artifact chain,
 // and inserts a change_request in state "pending".
 func (s *Service) Submit(ctx context.Context, actor *auth.User, req SubmitRequest) (int64, error) {
@@ -86,6 +107,7 @@ func (s *Service) Submit(ctx context.Context, actor *auth.User, req SubmitReques
 	if strings.ToLower(req.Protocol) == "" {
 		return 0, fmt.Errorf("protocol is required")
 	}
+	req.normalize()
 
 	// Take snapshot (S1).
 	snapshotRaw, err := s.runSnapshot(ctx)
