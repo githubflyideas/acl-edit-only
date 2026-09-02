@@ -61,6 +61,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 
 	// Dispatch.
 	mux.HandleFunc("/dispatch", h.requireSession(h.handleDispatch))
+	mux.HandleFunc("/dispatch/stream", h.requireSession(h.handleDispatchSSE))
 
 	// Admin.
 	mux.HandleFunc("/admin/users", h.requireSession(h.requireRole(auth.RoleAdmin, h.handleAdminUsers)))
@@ -262,8 +263,7 @@ func (h *Handler) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
 	actor := r.Context().Value(ctxUser).(*auth.User)
 	h.render(w, r, "request_detail.html", map[string]interface{}{
 		"D": d, "Actor": actor, "CSRF": csrfToken(r),
-		"CanApprove":  actor.ID != 0 && canApproveRole(actor.Role) && d.State == "pending",
-		"CanDispatch": canDispatchRole(actor.Role) && d.State == "approved",
+		"CanExecute": d.State == "pending" || d.State == "approved",
 	})
 }
 

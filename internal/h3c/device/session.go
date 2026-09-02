@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"io"
 	"strings"
 	"time"
 )
@@ -28,6 +29,7 @@ func aclViewPromptRe(aclNum int) *regexp.Regexp {
 }
 
 type Session struct {
+	stream io.Writer
 	tr      Transport
 	cfg     DialConfig
 	auth    *Auth
@@ -158,7 +160,10 @@ func (s *Session) send(ctx context.Context, txt string) error { return s.tr.Send
 
 func (s *Session) readUntil(ctx context.Context, patterns []string) (string, int, error) {
 	out, idx, err := s.tr.ReadUntil(ctx, patterns, time.Now().Add(s.timeout))
-	if !s.inAuth { s.rawBuf.WriteString(out) }
+	if !s.inAuth {
+		s.rawBuf.WriteString(out)
+		if s.stream != nil { s.stream.Write([]byte(out)) }
+	}
 	if err != nil { return out, idx, &SessionError{Stage: "view", Cause: err} }
 	return out, idx, nil
 }

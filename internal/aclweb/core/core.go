@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -208,11 +209,7 @@ func (s *Service) Approve(ctx context.Context, actor *auth.User, crID int64, com
 	}
 	if err != nil { return fmt.Errorf("request %d not found", crID) }
 
-	// Self-approval check.
-	if requesterID == actor.ID {
-		s.auditDirect(actor, "change_request", crID, "self_approval_denied", nil)
-		return fmt.Errorf("four-eyes: approver must differ from requester (self_approval_denied)")
-	}
+	// No four-eyes enforced – single-operator mode: submitter may approve their own request.
 	// Optimistic concurrency: only update if still pending.
 	res, err := tx.ExecContext(ctx,
 		`UPDATE change_requests SET state='approved', approver_id=?, approved_at=?, approve_comment=?
@@ -498,15 +495,26 @@ func (s *Service) runSnapshot(ctx context.Context) (string, error) {
 }
 
 func (s *Service) runAgent(ctx context.Context, subcmd string, extraArgs ...string) (plan.Response, error) {
+	return s.runAgentStream(ctx, nil, subcmd, extraArgs...)
+}
+
+// runAgentStream is like runAgent but streams stderr (terminal output) to w in real time.
+// Pass w=nil to discard. The --stream flag is added automatically when w != nil.
+func (s *Service) runAgentStream(ctx context.Context, w io.Writer, subcmd string, extraArgs ...string) (plan.Response, error) {
 	tctx, cancel := context.WithTimeout(ctx, s.cfg.AgentTimeout)
 	defer cancel()
 
 	args := []string{s.cfg.AgentBin, subcmd, "--config", s.cfg.AgentCfg}
+	if w != nil {
+		args = append(args, "--stream")
+	}
 	args = append(args, extraArgs...)
 	cmd := exec.CommandContext(tctx, "sudo", args...)
+	if w != nil {
+		cmd.Stderr = w
+	}
 	out, err := cmd.Output()
 	if err != nil {
-		// Try to parse response from stdout even on non-zero exit.
 		if len(out) > 0 {
 			resp, jerr := plan.UnmarshalResponse(out)
 			if jerr == nil { return resp, fmt.Errorf("agent exited with error") }
@@ -735,4 +743,77 @@ func canApprove(role string) bool {
 }
 func canDispatch(role string) bool {
 	return role == auth.RoleAdmin || role == auth.RoleOperator
+}
+
+// ──────────────────────────────────────────────────────────────────
+// 6. Streaming dispatch (for real-time terminal view in browser)
+// ──────────────────────────────────────────────────────────────────
+
+// DispatchStream is like Dispatch but streams terminal output to w line by line.
+// Must be called under the application-level single-writer mutex.
+func (s *Service) DispatchStream(ctx context.Context, actor *auth.User, crID int64, w io.Writer) error {
+	if !canDispatch(actor.Role) { return fmt.Errorf("role %s cannot dispatch", actor.Role) }
+
+	var code string
+	var ruleID int
+	var planSHA string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT cr.request_code, cr.rule_id, ca.plan_sha256
+		FROM change_requests cr
+		JOIN change_artifacts ca ON ca.request_id = cr.id
+		WHERE cr.id=? AND cr.state='approved'`, crID,
+	).Scan(&code, &ruleID, &planSHA)
+	if err != nil { return fmt.Errorf("approved request %d not found: %w", crID, err) }
+
+	preRaw, err := s.runAgent(ctx, "snapshot")
+	if err != nil { return fmt.Errorf("pre-dispatch snapshot: %w", err) }
+	preSnapshotID, _ := s.saveSnapshot(preRaw.Raw, "pre_dispatch")
+
+	expectCount := parseRuleCount(preRaw.Raw)
+	if err := updatePlanExpectCount(s.cfg.PlanDir, code, expectCount); err != nil {
+		return fmt.Errorf("update plan expect_count: %w", err)
+	}
+	planSHA, err = planFileSHA(s.cfg.PlanDir, code)
+	if err != nil { return err }
+
+	s.db.ExecContext(ctx, `UPDATE change_requests SET state='dispatching', dispatched_at=? WHERE id=?`,
+		time.Now().Unix(), crID)
+
+	// Stream the apply execution.
+	agentResp, runErr := s.runAgentStream(ctx, w, "apply",
+		"--request", code, "--plan-sha256", planSHA)
+
+	postRaw, _ := s.runAgent(ctx, "snapshot")
+	postSnapshotID, _ := s.saveSnapshot(postRaw.Raw, "post_dispatch")
+
+	s.db.ExecContext(ctx, `
+		INSERT INTO agent_runs(
+			request_id, plan_sha256, op, result, stage, detail, raw_output,
+			snapshot_before, snapshot_after,
+			bound_acl, bound_range_min, bound_range_max, bound_alloc_max,
+			config_sha256, agent_version, finished_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		crID, planSHA, "apply",
+		agentResp.Result, agentResp.Stage, agentResp.Detail, agentResp.Raw,
+		preSnapshotID, postSnapshotID,
+		agentResp.BoundACL, agentResp.BoundRangeMin, agentResp.BoundRangeMax, agentResp.BoundAllocMax,
+		agentResp.ConfigSHA256, agentResp.AgentVersion, time.Now().Unix(),
+	)
+
+	if agentResp.BoundACL != 0 && (agentResp.BoundACL != s.cfg.ACL ||
+		agentResp.BoundRangeMin != s.cfg.RangeMin || agentResp.BoundRangeMax != s.cfg.RangeMax) {
+		s.db.ExecContext(ctx, `UPDATE change_requests SET state='inconsistent' WHERE id=?`, crID)
+		return fmt.Errorf("agent binding mismatch")
+	}
+
+	if runErr != nil || agentResp.Result != plan.ResultOK {
+		return s.handleDispatchFailure(ctx, actor, crID, code, ruleID, preRaw.Raw)
+	}
+	if err := verifyChange(preRaw.Raw, postRaw.Raw, ruleID); err != nil {
+		return s.handleDispatchFailure(ctx, actor, crID, code, ruleID, preRaw.Raw)
+	}
+
+	s.db.ExecContext(ctx, `UPDATE change_requests SET state='active' WHERE id=?`, crID)
+	s.auditDirect(actor, "change_request", crID, "dispatched", map[string]interface{}{"rule_id": ruleID})
+	return nil
 }

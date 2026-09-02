@@ -4,7 +4,11 @@
   <strong>ACL 审批系统</strong>
   <a href="/requests">变更请求</a>
   <span class="sep"></span>
-  <span style="font-size:.85rem">{{.Actor.Username}} ({{.Actor.Role}})</span>
+  <span style="font-size:.85rem">{{.Actor.Username}}</span>
+  <form method="post" action="/logout" style="margin:0">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <button class="btn btn-outline" style="padding:4px 10px;font-size:.8rem">退出</button>
+  </form>
 </nav>
 <div class="container">
   <h2>{{.D.Code}} <span class="badge badge-{{.D.State}}">{{.D.State}}</span></h2>
@@ -13,8 +17,6 @@
     <table>
       <tr><th style="width:160px">操作类型</th><td>{{.D.Action}}</td></tr>
       <tr><th>申请人</th><td>{{.D.Requester}}</td></tr>
-      <tr><th>审批人</th><td>{{if .D.Approver}}{{.D.Approver}}{{else}}—{{end}}</td></tr>
-      <tr><th>审批意见</th><td>{{if .D.ApproveComment}}{{.D.ApproveComment}}{{else}}—{{end}}</td></tr>
       <tr><th>Rule ID</th><td>{{if .D.RuleID}}{{.D.RuleID}}{{else}}（待分配）{{end}}</td></tr>
       <tr><th>协议</th><td>{{.D.Protocol}}</td></tr>
       <tr><th>源 IP</th><td>{{if .D.SrcIP}}{{.D.SrcIP}}{{else}}any{{end}}</td></tr>
@@ -27,45 +29,88 @@
 
   {{if .D.DiffText}}
   <div class="card">
-    <h3 style="margin-top:0">变更 Diff（审批依据）</h3>
-    <pre>{{.D.DiffText}}</pre>
+    <h3 style="margin-top:0">变更 Diff</h3>
+    <pre id="diff-block">{{.D.DiffText}}</pre>
   </div>
   {{end}}
 
-  {{if .CanApprove}}
-  <div class="card">
-    <h3 style="margin-top:0">审批操作</h3>
-    <form method="post" action="/approve" style="margin-bottom:12px">
-      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
-      <input type="hidden" name="cr_id" value="{{.D.ID}}">
-      <div class="form-row">
-        <label>审批意见</label>
-        <input name="comment" placeholder="可选">
-      </div>
-      <button class="btn btn-success" type="submit">通过</button>
-    </form>
+  {{if .CanExecute}}
+  <div class="card" id="exec-card">
+    <h3 style="margin-top:0">确认并执行</h3>
+    <p style="color:#555;font-size:.9rem">
+      仔细核对上方 diff，确认无误后点击执行。执行过程将实时显示终端输出。
+    </p>
+    <button class="btn btn-primary" id="exec-btn" onclick="startExec()">确认执行</button>
+    <button class="btn btn-danger" id="reject-btn" style="margin-left:8px" onclick="showReject()">拒绝</button>
+  </div>
+
+  <div class="card" id="terminal-card" style="display:none">
+    <h3 style="margin-top:0;font-family:monospace">终端输出</h3>
+    <pre id="terminal" style="background:#1e1e1e;color:#d4d4d4;min-height:200px;max-height:480px;overflow-y:auto;font-size:.82rem;padding:14px"></pre>
+    <div id="term-status" style="margin-top:10px;font-weight:600"></div>
+  </div>
+
+  <div class="card" id="reject-card" style="display:none">
+    <h3 style="margin-top:0">拒绝原因</h3>
     <form method="post" action="/reject">
       <input type="hidden" name="csrf_token" value="{{.CSRF}}">
       <input type="hidden" name="cr_id" value="{{.D.ID}}">
       <div class="form-row">
-        <label>拒绝原因</label>
-        <input name="comment" required>
+        <input name="comment" placeholder="填写拒绝原因" required>
       </div>
-      <button class="btn btn-danger" type="submit">拒绝</button>
+      <button class="btn btn-danger" type="submit">确认拒绝</button>
+      <button type="button" class="btn btn-outline" style="margin-left:8px" onclick="hideReject()">取消</button>
     </form>
   </div>
-  {{end}}
 
-  {{if .CanDispatch}}
-  <div class="card">
-    <h3 style="margin-top:0">下发执行</h3>
-    <p style="color:#555;font-size:.9rem">下发后将通过 acl-agent 写入设备，并自动回读验证。请确认 diff 无误后再操作。</p>
-    <form method="post" action="/dispatch">
-      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
-      <input type="hidden" name="cr_id" value="{{.D.ID}}">
-      <button class="btn btn-primary" type="submit" onclick="return confirm('确认下发到设备？')">确认下发</button>
-    </form>
-  </div>
+  <script>
+  const CSRF  = {{.CSRF}};
+  const CR_ID = {{.D.ID}};
+
+  function startExec() {
+    document.getElementById('exec-btn').disabled = true;
+    document.getElementById('reject-btn').disabled = true;
+    document.getElementById('terminal-card').style.display = '';
+    const term = document.getElementById('terminal');
+    const status = document.getElementById('term-status');
+    term.textContent = '';
+
+    const url = '/dispatch/stream?cr_id=' + CR_ID + '&csrf_token=' + encodeURIComponent(CSRF);
+    const es = new EventSource(url);
+
+    es.onmessage = function(e) {
+      term.textContent += e.data + '\n';
+      term.scrollTop = term.scrollHeight;
+    };
+    es.addEventListener('done', function(e) {
+      es.close();
+      status.style.color = '#2e7d32';
+      status.textContent = '✓ 执行成功，页面将自动刷新…';
+      setTimeout(function(){ location.reload(); }, 2000);
+    });
+    es.addEventListener('error', function(e) {
+      es.close();
+      status.style.color = '#c62828';
+      status.textContent = '✗ 执行失败：' + (e.data || '未知错误');
+    });
+    es.onerror = function() {
+      es.close();
+      if (!status.textContent) {
+        status.style.color = '#c62828';
+        status.textContent = '✗ 连接中断';
+      }
+    };
+  }
+
+  function showReject() {
+    document.getElementById('reject-card').style.display = '';
+    document.getElementById('exec-card').style.display = 'none';
+  }
+  function hideReject() {
+    document.getElementById('reject-card').style.display = 'none';
+    document.getElementById('exec-card').style.display = '';
+  }
+  </script>
   {{end}}
 
   {{if eq .D.State "active"}}

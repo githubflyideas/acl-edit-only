@@ -41,6 +41,7 @@ func run() error {
 	configPath := fs.String("config", "/etc/aclsys/agent.json", "agent config file")
 	requestID  := fs.String("request", "", "change request ID")
 	planSHA256 := fs.String("plan-sha256", "", "expected SHA-256 of plan file")
+	streamMode := fs.Bool("stream", false, "write terminal output to stderr line by line")
 	if err := fs.Parse(os.Args[2:]); err != nil { return err }
 
 	cfg, err := LoadConfig(*configPath)
@@ -71,25 +72,31 @@ func run() error {
 	ctx := context.Background()
 	switch subcmd {
 	case "snapshot":
-		return doSnapshot(ctx, cfg, password)
+		var sw io.Writer
+	if *streamMode { sw = os.Stderr }
+	return doSnapshot(ctx, cfg, password, sw)
 	case "apply":
 		if *requestID == "" || *planSHA256 == "" {
 			writeFailResponse(cfg, plan.ResultPlanRejected, plan.StageConnect, "--request and --plan-sha256 required")
 			return fmt.Errorf("missing flags")
 		}
-		return doApply(ctx, cfg, password, *requestID, *planSHA256)
+		var sw2 io.Writer
+	if *streamMode { sw2 = os.Stderr }
+	return doApply(ctx, cfg, password, sw2, *requestID, *planSHA256)
 	case "rollback":
 		if *requestID == "" {
 			writeFailResponse(cfg, plan.ResultPlanRejected, plan.StageConnect, "--request required")
 			return fmt.Errorf("missing --request")
 		}
-		return doRollback(ctx, cfg, password, *requestID)
+		var sw3 io.Writer
+	if *streamMode { sw3 = os.Stderr }
+	return doRollback(ctx, cfg, password, sw3, *requestID)
 	}
 	return nil
 }
 
-func doSnapshot(ctx context.Context, cfg *AgentConfig, password []byte) error {
-	s, err := openSession(ctx, cfg, password)
+func doSnapshot(ctx context.Context, cfg *AgentConfig, password []byte, stream io.Writer) error {
+	s, err := openSession(ctx, cfg, password, stream)
 	if err != nil {
 		writeFailResponse(cfg, resultFromSE(err), stageFromSE(err), sanitise(err.Error()))
 		return err
@@ -104,7 +111,7 @@ func doSnapshot(ctx context.Context, cfg *AgentConfig, password []byte) error {
 	return nil
 }
 
-func doApply(ctx context.Context, cfg *AgentConfig, password []byte, reqID, wantSHA string) error {
+func doApply(ctx context.Context, cfg *AgentConfig, password []byte, stream io.Writer, reqID, wantSHA string) error {
 	if err := checkAndIncrementQuota(cfg); err != nil {
 		writeFailResponse(cfg, plan.ResultGuardFailed, plan.StageConnect, err.Error())
 		return err
@@ -122,7 +129,7 @@ func doApply(ctx context.Context, cfg *AgentConfig, password []byte, reqID, want
 		writeFailResponse(cfg, plan.ResultGuardFailed, plan.StageConnect, err.Error())
 		return err
 	}
-	s, err := openSession(ctx, cfg, password)
+	s, err := openSession(ctx, cfg, password, stream)
 	if err != nil {
 		writeFailResponse(cfg, resultFromSE(err), stageFromSE(err), sanitise(err.Error()))
 		return err
@@ -137,7 +144,7 @@ func doApply(ctx context.Context, cfg *AgentConfig, password []byte, reqID, want
 	return nil
 }
 
-func doRollback(ctx context.Context, cfg *AgentConfig, password []byte, reqID string) error {
+func doRollback(ctx context.Context, cfg *AgentConfig, password []byte, stream io.Writer, reqID string) error {
 	p, err := loadPlanFile(cfg, reqID)
 	if err != nil {
 		writeFailResponse(cfg, plan.ResultPlanRejected, plan.StageConnect, sanitise(err.Error()))
@@ -148,7 +155,7 @@ func doRollback(ctx context.Context, cfg *AgentConfig, password []byte, reqID st
 		writeFailResponse(cfg, plan.ResultGuardFailed, plan.StageConnect, msg)
 		return fmt.Errorf("%s", msg)
 	}
-	s, err := openSession(ctx, cfg, password)
+	s, err := openSession(ctx, cfg, password, stream)
 	if err != nil {
 		writeFailResponse(cfg, resultFromSE(err), stageFromSE(err), sanitise(err.Error()))
 		return err
@@ -164,7 +171,7 @@ func doRollback(ctx context.Context, cfg *AgentConfig, password []byte, reqID st
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-func openSession(ctx context.Context, cfg *AgentConfig, password []byte) (*device.Session, error) {
+func openSession(ctx context.Context, cfg *AgentConfig, password []byte, stream io.Writer) (*device.Session, error) {
 	tr := &device.TelnetTransport{}
 	dialCfg := device.DialConfig{
 		Addr:           cfg.DeviceAddr,
@@ -175,6 +182,7 @@ func openSession(ctx context.Context, cfg *AgentConfig, password []byte) (*devic
 	if username == "" { username = "admin" }
 	auth := &device.Auth{Username: username, Password: password}
 	s := device.NewSession(tr, dialCfg, auth, cfg.ACL, time.Duration(cfg.ReadTimeout)*time.Second)
+	if stream != nil { s.SetStream(stream) }
 	return s, s.Open(ctx)
 }
 
