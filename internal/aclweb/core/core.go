@@ -5,12 +5,14 @@ package core
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"io"
+	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -102,9 +104,37 @@ func (s *Service) Submit(ctx context.Context, actor *auth.User, req SubmitReques
 	}
 	expectCount := parseRuleCount(snapshotRaw)
 
-	// Build plan P.
-	code, err := s.nextRequestCode()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil { return 0, err }
+	defer tx.Rollback() //nolint:errcheck
+
+	// The request code is derived from the row's own primary key rather than
+	// from COUNT(*). A count collides after any deletion and races between two
+	// concurrent submits, and because the code names the plan file, a collision
+	// meant one request silently overwrote another request's plan — detected
+	// only later, as a SHA mismatch at dispatch time.
+	placeholder := "PENDING-" + randomToken()
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO change_requests(
+			request_code, action, requester_id, state, reason,
+			protocol, src_ip, src_wildcard, src_port_op, src_port_val,
+			dst_ip, dst_wildcard, dst_port_op, dst_port_val,
+			rule_id)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		placeholder, "add_rule", actor.ID, "pending", req.Reason,
+		req.Protocol, req.SrcIP, req.SrcWildcard, req.SrcPortOp, req.SrcPortVal,
+		req.DstIP, req.DstWildcard, req.DstPortOp, req.DstPortVal,
+		ruleID,
+	)
+	if err != nil { return 0, err }
+	crID, err := res.LastInsertId()
+	if err != nil { return 0, err }
+
+	code := fmt.Sprintf("REQ-%s-%04d", time.Now().Format("20060102"), crID)
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE change_requests SET request_code=? WHERE id=?`, code, crID); err != nil {
+		return 0, err
+	}
 
 	comment := buildComment(code, req.DstIP+req.DstWildcard+req.Protocol+req.DstPortOp+strconv.Itoa(req.DstPortVal))
 
@@ -127,60 +157,45 @@ func (s *Service) Submit(ctx context.Context, actor *auth.User, req SubmitReques
 	if req.SrcPortOp != "" {
 		p.SrcPort = &plan.PortCond{Op: req.SrcPortOp, Value: uint16(req.SrcPortVal)}
 	}
+	// Reject a plan the agent would refuse, here, while there is a human to
+	// tell about it — rather than at dispatch time.
+	if err := plan.ValidateForAgent(&p, s.cfg.RangeMin, s.cfg.RangeMax, s.cfg.AllocMax); err != nil {
+		return 0, fmt.Errorf("plan rejected: %w", err)
+	}
 
 	planJSON, err := json.Marshal(p)
 	if err != nil { return 0, err }
 
-	// Build artifacts: old config = snapshot raw, new config = snapshot + expected new rule line,
-	// diff = unified diff between the two.
 	oldCfg := snapshotRaw
 	newCfg := buildExpectedConfig(snapshotRaw, &p)
 	diffText := unifiedDiff(oldCfg, newCfg)
 
-	oldSHA := sha256hex([]byte(oldCfg))
-	newSHA := sha256hex([]byte(newCfg))
-	diffSHA := sha256hex([]byte(diffText))
-	planSHA := sha256hex(planJSON)
-
-	// Write plan file atomically.
 	if err := writePlanFile(s.cfg.PlanDir, code, planJSON); err != nil {
 		return 0, err
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil { return 0, err }
-	defer tx.Rollback()
-
-	res, err := tx.ExecContext(ctx, `
-		INSERT INTO change_requests(
-			request_code, action, requester_id, state, reason,
-			protocol, src_ip, src_wildcard, src_port_op, src_port_val,
-			dst_ip, dst_wildcard, dst_port_op, dst_port_val,
-			rule_id)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		code, "add_rule", actor.ID, "pending", req.Reason,
-		req.Protocol, req.SrcIP, req.SrcWildcard, req.SrcPortOp, req.SrcPortVal,
-		req.DstIP, req.DstWildcard, req.DstPortOp, req.DstPortVal,
-		ruleID,
-	)
-	if err != nil { return 0, err }
-	crID, _ := res.LastInsertId()
-
-	_, err = tx.ExecContext(ctx, `
+	if _, err = tx.ExecContext(ctx, `
 		INSERT INTO change_artifacts(
 			request_id, snapshot_before_id, old_config, new_config, diff_text, plan_json,
 			old_sha256, new_sha256, diff_sha256, plan_sha256)
 		VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		crID, snapshotID, oldCfg, newCfg, diffText, string(planJSON),
-		oldSHA, newSHA, diffSHA, planSHA,
-	)
-	if err != nil { return 0, err }
+		sha256hex([]byte(oldCfg)), sha256hex([]byte(newCfg)),
+		sha256hex([]byte(diffText)), sha256hex(planJSON),
+	); err != nil {
+		removePlanFile(s.cfg.PlanDir, code)
+		return 0, err
+	}
 
 	s.audit(tx, actor, "change_request", crID, "submitted", map[string]interface{}{
-		"request_code": code, "rule_id": ruleID, "plan_sha256": planSHA,
+		"request_code": code, "rule_id": ruleID, "plan_sha256": sha256hex(planJSON),
 	})
 
-	return crID, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		removePlanFile(s.cfg.PlanDir, code)
+		return 0, err
+	}
+	return crID, nil
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -188,7 +203,6 @@ func (s *Service) Submit(ctx context.Context, actor *auth.User, req SubmitReques
 // ──────────────────────────────────────────────────────────────────
 
 // Approve transitions a pending request to approved.
-// Enforces four-eyes: approver must differ from requester.
 func (s *Service) Approve(ctx context.Context, actor *auth.User, crID int64, comment string) error {
 	if !canApprove(actor.Role) {
 		return fmt.Errorf("role %s cannot approve", actor.Role)
@@ -197,22 +211,18 @@ func (s *Service) Approve(ctx context.Context, actor *auth.User, crID int64, com
 	if err != nil { return err }
 	defer tx.Rollback()
 
+	// SQLite has no SELECT ... FOR UPDATE; the UPDATE below is guarded by
+	// state='pending' instead, which is what makes a concurrent approval lose.
 	var requesterID int64
 	var state string
-	err = tx.QueryRowContext(ctx,
-		`SELECT requester_id, state FROM change_requests WHERE id=? FOR UPDATE`,
-		crID,
-	).Scan(&requesterID, &state)
-	// SQLite doesn't support FOR UPDATE; we use optimistic WHERE state='pending'.
-	if err != nil {
-		err = tx.QueryRowContext(ctx,
-			`SELECT requester_id, state FROM change_requests WHERE id=?`, crID,
-		).Scan(&requesterID, &state)
+	if err := tx.QueryRowContext(ctx,
+		`SELECT requester_id, state FROM change_requests WHERE id=?`, crID,
+	).Scan(&requesterID, &state); err != nil {
+		return fmt.Errorf("request %d not found", crID)
 	}
-	if err != nil { return fmt.Errorf("request %d not found", crID) }
 
-	// No four-eyes enforced – single-operator mode: submitter may approve their own request.
-	// Optimistic concurrency: only update if still pending.
+	// Single-operator mode: the submitter may confirm their own request. The
+	// safeguard is the diff they have to read, not a second person.
 	res, err := tx.ExecContext(ctx,
 		`UPDATE change_requests SET state='approved', approver_id=?, approved_at=?, approve_comment=?
 		 WHERE id=? AND state='pending'`,
@@ -244,115 +254,10 @@ func (s *Service) Reject(ctx context.Context, actor *auth.User, crID int64, comm
 // 3. Dispatch (must be called under a global write mutex)
 // ──────────────────────────────────────────────────────────────────
 
-// Dispatch executes an approved change request.
+// Dispatch executes a confirmed change request without streaming.
 // It must be called while holding the application-level single-writer mutex.
 func (s *Service) Dispatch(ctx context.Context, actor *auth.User, crID int64) error {
-	if !canDispatch(actor.Role) { return fmt.Errorf("role %s cannot dispatch", actor.Role) }
-
-	// Load request + artifacts.
-	var code string
-	var ruleID int
-	var planSHA string
-	var expectCount int
-	err := s.db.QueryRowContext(ctx, `
-		SELECT cr.request_code, cr.rule_id, ca.plan_sha256
-		FROM change_requests cr
-		JOIN change_artifacts ca ON ca.request_id = cr.id
-		WHERE cr.id=? AND cr.state='approved'`, crID,
-	).Scan(&code, &ruleID, &planSHA)
-	if err != nil { return fmt.Errorf("approved request %d not found: %w", crID, err) }
-
-	// Pre-dispatch snapshot (drift detection).
-	preRaw, err := s.runSnapshot(ctx)
-	if err != nil { return fmt.Errorf("pre-dispatch snapshot: %w", err) }
-
-	preSnapshotID, _ := s.saveSnapshot(preRaw, "pre_dispatch")
-
-	// Compare fingerprint with approval-time snapshot fingerprint.
-	var approvalFingerprint string
-	s.db.QueryRowContext(ctx, `
-		SELECT acl_snapshots.fingerprint
-		FROM change_artifacts
-		JOIN acl_snapshots ON acl_snapshots.id = change_artifacts.snapshot_before_id
-		WHERE change_artifacts.request_id=?`, crID,
-	).Scan(&approvalFingerprint)
-
-	preFP := fingerprintRaw(preRaw)
-	if approvalFingerprint != "" && preFP != approvalFingerprint {
-		// Drift: revert to pending.
-		s.db.ExecContext(ctx,
-			`UPDATE change_requests SET state='drift' WHERE id=?`, crID)
-		s.auditDirect(actor, "change_request", crID, "drift", map[string]interface{}{
-			"approval_fp": approvalFingerprint, "current_fp": preFP,
-		})
-		return fmt.Errorf("drift: network changed since approval; request reverted to pending")
-	}
-
-	expectCount = parseRuleCount(preRaw)
-
-	// Update expect_count in plan file to match current snapshot.
-	if err := updatePlanExpectCount(s.cfg.PlanDir, code, expectCount); err != nil {
-		return fmt.Errorf("update plan expect_count: %w", err)
-	}
-	// Recompute plan SHA after update.
-	planSHA, err = planFileSHA(s.cfg.PlanDir, code)
-	if err != nil { return err }
-
-	// Transition to dispatching.
-	s.db.ExecContext(ctx,
-		`UPDATE change_requests SET state='dispatching', dispatched_at=? WHERE id=?`,
-		time.Now().Unix(), crID)
-
-	// Call acl-agent apply.
-	agentResp, runErr := s.runAgent(ctx, "apply",
-		"--request", code, "--plan-sha256", planSHA)
-
-	// Post-dispatch snapshot.
-	postRaw, _ := s.runSnapshot(ctx)
-	postSnapshotID, _ := s.saveSnapshot(postRaw, "post_dispatch")
-
-	// Record agent run.
-	s.db.ExecContext(ctx, `
-		INSERT INTO agent_runs(
-			request_id, plan_sha256, op, result, stage, detail, raw_output,
-			snapshot_before, snapshot_after,
-			bound_acl, bound_range_min, bound_range_max, bound_alloc_max,
-			config_sha256, agent_version, finished_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		crID, planSHA, "apply",
-		agentResp.Result, agentResp.Stage, agentResp.Detail, agentResp.Raw,
-		preSnapshotID, postSnapshotID,
-		agentResp.BoundACL, agentResp.BoundRangeMin, agentResp.BoundRangeMax, agentResp.BoundAllocMax,
-		agentResp.ConfigSHA256, agentResp.AgentVersion, time.Now().Unix(),
-	)
-
-	// Cross-check binding.
-	if agentResp.BoundACL != s.cfg.ACL ||
-		agentResp.BoundRangeMin != s.cfg.RangeMin ||
-		agentResp.BoundRangeMax != s.cfg.RangeMax {
-		s.db.ExecContext(ctx, `UPDATE change_requests SET state='inconsistent' WHERE id=?`, crID)
-		s.auditDirect(actor, "change_request", crID, "binding_mismatch", map[string]interface{}{
-			"agent_acl": agentResp.BoundACL, "expected_acl": s.cfg.ACL,
-		})
-		return fmt.Errorf("agent binding mismatch: agent ACL %d ≠ expected %d",
-			agentResp.BoundACL, s.cfg.ACL)
-	}
-
-	if runErr != nil || agentResp.Result != plan.ResultOK {
-		// Attempt rollback.
-		return s.handleDispatchFailure(ctx, actor, crID, code, ruleID, preRaw)
-	}
-
-	// Verify: four assertions on post vs pre snapshot.
-	if err := verifyChange(preRaw, postRaw, ruleID); err != nil {
-		return s.handleDispatchFailure(ctx, actor, crID, code, ruleID, preRaw)
-	}
-
-	s.db.ExecContext(ctx, `UPDATE change_requests SET state='active' WHERE id=?`, crID)
-	s.auditDirect(actor, "change_request", crID, "dispatched", map[string]interface{}{
-		"rule_id": ruleID, "plan_sha256": planSHA,
-	})
-	return nil
+	return s.DispatchStream(ctx, actor, crID, nil)
 }
 
 func (s *Service) handleDispatchFailure(
@@ -405,51 +310,69 @@ func (s *Service) SubmitDelete(ctx context.Context, actor *auth.User, existingCR
 		return 0, fmt.Errorf("rule %d not found in current device snapshot", ruleID)
 	}
 
-	code, _ := s.nextRequestCode()
-	comment := buildComment(code, fmt.Sprintf("delete-%d", ruleID))
-	p := plan.Plan{
-		RequestID:         code,
-		Op:                plan.OpDelete,
-		RuleID:            ruleID,
-		Action:            plan.ActionPermit,
-		Comment:           comment,
-		ExpectCountBefore: parseRuleCount(snapshotRaw),
+	expectCount := parseRuleCount(snapshotRaw)
+	if expectCount < 0 {
+		return 0, fmt.Errorf("cannot parse rule count from snapshot")
 	}
-	planJSON, _ := json.Marshal(p)
-	planSHA := sha256hex(planJSON)
-	writePlanFile(s.cfg.PlanDir, code, planJSON)
-
 	snapshotID, _ := s.saveSnapshot(snapshotRaw, "pre_request")
-	oldCfg := snapshotRaw
-	newCfg := removeRuleFromConfig(snapshotRaw, ruleID)
-	diffText := unifiedDiff(oldCfg, newCfg)
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil { return 0, err }
-	defer tx.Rollback()
+	defer tx.Rollback() //nolint:errcheck
 
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO change_requests(
 			request_code, action, requester_id, state, reason,
 			dst_ip, dst_wildcard, rule_id)
 		VALUES(?,?,?,?,?,?,?,?)`,
-		code, "delete_rule", actor.ID, "pending", reason, "N/A", "N/A", ruleID,
+		"PENDING-"+randomToken(), "delete_rule", actor.ID, "pending", reason, "N/A", "N/A", ruleID,
 	)
 	if err != nil { return 0, err }
-	newCRID, _ := res.LastInsertId()
+	newCRID, err := res.LastInsertId()
+	if err != nil { return 0, err }
 
-	tx.ExecContext(ctx, `
+	code := fmt.Sprintf("REQ-%s-%04d", time.Now().Format("20060102"), newCRID)
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE change_requests SET request_code=? WHERE id=?`, code, newCRID); err != nil {
+		return 0, err
+	}
+
+	p := plan.Plan{
+		RequestID:         code,
+		Op:                plan.OpDelete,
+		RuleID:            ruleID,
+		Action:            plan.ActionPermit,
+		Comment:           buildComment(code, fmt.Sprintf("delete-%d", ruleID)),
+		ExpectCountBefore: expectCount,
+	}
+	planJSON, err := json.Marshal(p)
+	if err != nil { return 0, err }
+	if err := writePlanFile(s.cfg.PlanDir, code, planJSON); err != nil { return 0, err }
+
+	oldCfg := snapshotRaw
+	newCfg := removeRuleFromConfig(snapshotRaw, ruleID)
+	diffText := unifiedDiff(oldCfg, newCfg)
+
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO change_artifacts(
 			request_id, snapshot_before_id, old_config, new_config, diff_text, plan_json,
 			old_sha256, new_sha256, diff_sha256, plan_sha256)
 		VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		newCRID, snapshotID, oldCfg, newCfg, diffText, string(planJSON),
-		sha256hex([]byte(oldCfg)), sha256hex([]byte(newCfg)), sha256hex([]byte(diffText)), planSHA,
-	)
+		sha256hex([]byte(oldCfg)), sha256hex([]byte(newCfg)),
+		sha256hex([]byte(diffText)), sha256hex(planJSON),
+	); err != nil {
+		removePlanFile(s.cfg.PlanDir, code)
+		return 0, err
+	}
 	s.audit(tx, actor, "change_request", newCRID, "delete_submitted", map[string]interface{}{
 		"rule_id": ruleID, "original_req": reqCode,
 	})
-	return newCRID, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		removePlanFile(s.cfg.PlanDir, code)
+		return 0, err
+	}
+	return newCRID, nil
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -542,10 +465,14 @@ func (s *Service) saveSnapshot(raw, trigger string) (int64, error) {
 	return res.LastInsertId()
 }
 
-func (s *Service) nextRequestCode() (string, error) {
-	var n int
-	s.db.QueryRow(`SELECT COUNT(*) FROM change_requests`).Scan(&n)
-	return fmt.Sprintf("REQ-%s-%04d", time.Now().Format("20060102"), n+1), nil
+// randomToken is used only for the placeholder request code that reserves the
+// row before its real code is known.
+func randomToken() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return fmt.Sprintf("%x", b[:])
 }
 
 func (s *Service) audit(tx *sql.Tx, actor *auth.User, entity string, entityID int64, event string, detail interface{}) {
@@ -892,6 +819,12 @@ func writePlanFile(planDir, code string, data []byte) error {
 	return os.Rename(tmp, filepath.Join(planDir, code+".json"))
 }
 
+// removePlanFile cleans up a plan whose request never committed. A leftover
+// plan file is harmless but confusing during reconciliation.
+func removePlanFile(planDir, code string) {
+	_ = os.Remove(filepath.Join(planDir, code+".json"))
+}
+
 func planFileSHA(planDir, code string) (string, error) {
 	raw, err := os.ReadFile(filepath.Join(planDir, code+".json"))
 	if err != nil { return "", err }
@@ -928,44 +861,99 @@ func canDispatch(role string) bool {
 // 6. Streaming dispatch (for real-time terminal view in browser)
 // ──────────────────────────────────────────────────────────────────
 
-// DispatchStream is like Dispatch but streams terminal output to w line by line.
-// Must be called under the application-level single-writer mutex.
+// DispatchStream executes a change request, streaming the device session to w
+// as it happens (pass nil to discard). It must be called while holding the
+// application-level single-writer mutex, so only one agent ever touches the
+// switch at a time.
+//
+// This is the only dispatch implementation; Dispatch delegates here. Keeping
+// two copies is how the drift check went missing from the streaming path.
 func (s *Service) DispatchStream(ctx context.Context, actor *auth.User, crID int64, w io.Writer) error {
-	if !canDispatch(actor.Role) { return fmt.Errorf("role %s cannot dispatch", actor.Role) }
+	if !canDispatch(actor.Role) {
+		return fmt.Errorf("role %s cannot dispatch", actor.Role)
+	}
 
 	var code string
 	var ruleID int
-	var planSHA string
+	var planSHA, state string
+	// Single-operator mode: a request may be executed straight from 'pending'
+	// after the operator has read the diff. The confirmation is still recorded
+	// below, so the audit trail is the same either way.
 	err := s.db.QueryRowContext(ctx, `
-		SELECT cr.request_code, cr.rule_id, ca.plan_sha256
+		SELECT cr.request_code, cr.rule_id, cr.state, ca.plan_sha256
 		FROM change_requests cr
 		JOIN change_artifacts ca ON ca.request_id = cr.id
-		WHERE cr.id=? AND cr.state='approved'`, crID,
-	).Scan(&code, &ruleID, &planSHA)
-	if err != nil { return fmt.Errorf("approved request %d not found: %w", crID, err) }
+		WHERE cr.id=? AND cr.state IN ('pending','approved')`, crID,
+	).Scan(&code, &ruleID, &state, &planSHA)
+	if err != nil {
+		return fmt.Errorf("request %d is not awaiting execution: %w", crID, err)
+	}
 
-	preRaw, err := s.runAgent(ctx, "snapshot")
-	if err != nil { return fmt.Errorf("pre-dispatch snapshot: %w", err) }
-	preSnapshotID, _ := s.saveSnapshot(preRaw.Raw, "pre_dispatch")
+	preResp, err := s.runAgent(ctx, "snapshot")
+	if err != nil {
+		return fmt.Errorf("pre-dispatch snapshot: %w", err)
+	}
+	preRaw := preResp.Raw
+	if err := s.assertBinding(preResp); err != nil {
+		return err
+	}
+	preSnapshotID, _ := s.saveSnapshot(preRaw, "pre_dispatch")
 
-	expectCount := parseRuleCount(preRaw.Raw)
+	// Drift detection: the diff the operator approved described a specific
+	// device state. If the ACL has changed since, the approval no longer means
+	// what it said, so refuse rather than apply it to a different config.
+	var approvalFingerprint string
+	_ = s.db.QueryRowContext(ctx, `
+		SELECT acl_snapshots.fingerprint
+		FROM change_artifacts
+		JOIN acl_snapshots ON acl_snapshots.id = change_artifacts.snapshot_before_id
+		WHERE change_artifacts.request_id=?`, crID,
+	).Scan(&approvalFingerprint)
+	preFP := fingerprintRaw(preRaw)
+	if approvalFingerprint != "" && preFP != approvalFingerprint {
+		s.mustExec(ctx, `UPDATE change_requests SET state='drift' WHERE id=?`, crID)
+		s.auditDirect(actor, "change_request", crID, "drift", map[string]interface{}{
+			"approval_fp": approvalFingerprint, "current_fp": preFP,
+		})
+		return fmt.Errorf("drift: the ACL changed since this diff was produced; " +
+			"submit the request again to review a current diff")
+	}
+
+	expectCount := parseRuleCount(preRaw)
+	if expectCount < 0 {
+		return fmt.Errorf("cannot parse rule count from pre-dispatch snapshot")
+	}
 	if err := updatePlanExpectCount(s.cfg.PlanDir, code, expectCount); err != nil {
 		return fmt.Errorf("update plan expect_count: %w", err)
 	}
 	planSHA, err = planFileSHA(s.cfg.PlanDir, code)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
-	s.db.ExecContext(ctx, `UPDATE change_requests SET state='dispatching', dispatched_at=? WHERE id=?`,
-		time.Now().Unix(), crID)
+	// Claim the request. The state guard makes a concurrent second click lose
+	// instead of running the agent twice.
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE change_requests
+		SET state='dispatching', dispatched_at=?,
+		    approver_id=COALESCE(approver_id,?), approved_at=COALESCE(approved_at,?)
+		WHERE id=? AND state IN ('pending','approved')`,
+		time.Now().Unix(), actor.ID, time.Now().Unix(), crID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("request %d is already being executed", crID)
+	}
 
-	// Stream the apply execution.
 	agentResp, runErr := s.runAgentStream(ctx, w, "apply",
 		"--request", code, "--plan-sha256", planSHA)
 
-	postRaw, _ := s.runAgent(ctx, "snapshot")
-	postSnapshotID, _ := s.saveSnapshot(postRaw.Raw, "post_dispatch")
+	postResp, _ := s.runAgent(ctx, "snapshot")
+	postRaw := postResp.Raw
+	postSnapshotID, _ := s.saveSnapshot(postRaw, "post_dispatch")
 
-	s.db.ExecContext(ctx, `
+	s.mustExec(ctx, `
 		INSERT INTO agent_runs(
 			request_id, plan_sha256, op, result, stage, detail, raw_output,
 			snapshot_before, snapshot_after,
@@ -979,20 +967,54 @@ func (s *Service) DispatchStream(ctx context.Context, actor *auth.User, crID int
 		agentResp.ConfigSHA256, agentResp.AgentVersion, time.Now().Unix(),
 	)
 
-	if agentResp.BoundACL != 0 && (agentResp.BoundACL != s.cfg.ACL ||
-		agentResp.BoundRangeMin != s.cfg.RangeMin || agentResp.BoundRangeMax != s.cfg.RangeMax) {
-		s.db.ExecContext(ctx, `UPDATE change_requests SET state='inconsistent' WHERE id=?`, crID)
-		return fmt.Errorf("agent binding mismatch")
+	// The binding cross-check is the one error a diff cannot catch: if the two
+	// sides are bound to different ACLs, both snapshots come from the same
+	// wrong ACL and the diff looks perfect.
+	if err := s.assertBinding(agentResp); err != nil {
+		s.mustExec(ctx, `UPDATE change_requests SET state='inconsistent' WHERE id=?`, crID)
+		s.auditDirect(actor, "change_request", crID, "binding_mismatch", map[string]interface{}{
+			"agent_acl": agentResp.BoundACL, "expected_acl": s.cfg.ACL,
+		})
+		return err
 	}
 
 	if runErr != nil || agentResp.Result != plan.ResultOK {
-		return s.handleDispatchFailure(ctx, actor, crID, code, ruleID, preRaw.Raw)
+		return s.handleDispatchFailure(ctx, actor, crID, code, ruleID, preRaw)
 	}
-	if err := verifyChange(preRaw.Raw, postRaw.Raw, ruleID); err != nil {
-		return s.handleDispatchFailure(ctx, actor, crID, code, ruleID, preRaw.Raw)
+	if err := verifyChange(preRaw, postRaw, ruleID); err != nil {
+		s.auditDirect(actor, "change_request", crID, "verify_failed",
+			map[string]interface{}{"error": err.Error()})
+		return s.handleDispatchFailure(ctx, actor, crID, code, ruleID, preRaw)
 	}
 
-	s.db.ExecContext(ctx, `UPDATE change_requests SET state='active' WHERE id=?`, crID)
-	s.auditDirect(actor, "change_request", crID, "dispatched", map[string]interface{}{"rule_id": ruleID})
+	s.mustExec(ctx, `UPDATE change_requests SET state='active' WHERE id=?`, crID)
+	s.auditDirect(actor, "change_request", crID, "dispatched", map[string]interface{}{
+		"rule_id": ruleID, "plan_sha256": planSHA,
+	})
 	return nil
+}
+
+// assertBinding verifies the agent is bound to the same ACL and the same
+// allocation window as aclweb. Every response carries the binding, including
+// failures, and an absent binding is treated as a mismatch rather than as
+// permission to continue.
+func (s *Service) assertBinding(r plan.Response) error {
+	if r.BoundACL != s.cfg.ACL ||
+		r.BoundRangeMin != s.cfg.RangeMin ||
+		r.BoundRangeMax != s.cfg.RangeMax ||
+		r.BoundAllocMax != s.cfg.AllocMax {
+		return fmt.Errorf("agent binding mismatch: agent reports acl=%d range=[%d,%d] alloc_max=%d, "+
+			"aclweb expects acl=%d range=[%d,%d] alloc_max=%d",
+			r.BoundACL, r.BoundRangeMin, r.BoundRangeMax, r.BoundAllocMax,
+			s.cfg.ACL, s.cfg.RangeMin, s.cfg.RangeMax, s.cfg.AllocMax)
+	}
+	return nil
+}
+
+// mustExec runs a statement whose failure is worth logging but not worth
+// aborting a dispatch that has already touched the device.
+func (s *Service) mustExec(ctx context.Context, query string, args ...interface{}) {
+	if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+		log.Printf("aclweb: db exec failed: %v (query: %.60s)", err, query)
+	}
 }
