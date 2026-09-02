@@ -75,6 +75,13 @@ func buildAgent(t *testing.T, root, out string) {
 
 func newHarness(t *testing.T, rules []fakedev.Rule) *harness {
 	t.Helper()
+	return newHarnessCfg(t, rules, false)
+}
+
+// newHarnessCfg is newHarness with the ownership-comment switch exposed, so the
+// flow can be driven both with and without it.
+func newHarnessCfg(t *testing.T, rules []fakedev.Rule, ruleComment bool) *harness {
+	t.Helper()
 	root := repoRoot(t)
 	tmp := t.TempDir()
 
@@ -115,6 +122,7 @@ func newHarness(t *testing.T, rules []fakedev.Rule) *harness {
 		ACL: e2eACL, RangeMin: e2eRangeMin, RangeMax: e2eRangeMax, AllocMax: e2eRangeMax,
 		AgentBin: agentBin, AgentCfg: agentCfg, PlanDir: planDir,
 		AgentTimeout: 30 * time.Second,
+		RuleComment: ruleComment,
 	}, as)
 
 	tplFS := os.DirFS(filepath.Join(root, "cmd", "aclweb", "templates"))
@@ -223,7 +231,16 @@ func TestLoginAndRequestListRender(t *testing.T) {
 }
 
 func TestFullFlowSubmitReviewExecute(t *testing.T) {
-	h := newHarness(t, e2eRules(5))
+	t.Run("no comment", func(t *testing.T) { fullFlow(t, false) })
+	t.Run("with comment", func(t *testing.T) { fullFlow(t, true) })
+}
+
+// fullFlow walks the whole operator path — login, submit, read the diff,
+// execute, watch the terminal — and checks the device afterwards. It runs twice,
+// once with the ownership comment enabled and once without, because the comment
+// is the one part of the written configuration that is configurable.
+func fullFlow(t *testing.T, ruleComment bool) {
+	h := newHarnessCfg(t, e2eRules(5), ruleComment)
 	h.login(t)
 	tok := h.csrf(t)
 
@@ -290,8 +307,13 @@ func TestFullFlowSubmitReviewExecute(t *testing.T) {
 	if got.Body != "permit tcp source 192.168.10.5 0 destination 10.99.1.7 0 destination-port eq 8443" {
 		t.Errorf("device rule body = %q", got.Body)
 	}
-	if !strings.HasPrefix(got.Comment, "ACLSYS-REQ-REQ-") {
-		t.Errorf("device rule comment = %q, want an ownership mark", got.Comment)
+	if ruleComment {
+		if !strings.HasPrefix(got.Comment, "ACLSYS-REQ-REQ-") {
+			t.Errorf("device rule comment = %q, want an ownership mark", got.Comment)
+		}
+	} else if got.Comment != "" {
+		t.Errorf("device rule comment = %q, want none: the tool must add exactly "+
+			"one line unless comments are switched on", got.Comment)
 	}
 	if !h.dev.Saved {
 		t.Error("configuration was not saved on the device")

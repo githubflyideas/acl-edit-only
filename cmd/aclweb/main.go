@@ -47,6 +47,10 @@ type Config struct {
 	RangeMax int `json:"range_max"`
 	AllocMax int `json:"alloc_max"`
 
+	// RuleComment writes an ACLSYS-REQ ownership comment under every rule this
+	// tool creates. Off unless asked for.
+	RuleComment bool `json:"rule_comment"`
+
 	ReconcileIntervalMin int `json:"reconcile_interval_min"`
 }
 
@@ -94,6 +98,7 @@ func main() {
 		ACL: cfg.ACL, RangeMin: cfg.RangeMin, RangeMax: cfg.RangeMax, AllocMax: cfg.AllocMax,
 		AgentBin: cfg.AgentBin, AgentCfg: cfg.AgentCfg,
 		PlanDir: cfg.PlanDir, AgentTimeout: agentTimeout,
+		RuleComment: cfg.RuleComment,
 	}
 	svc := core.NewService(sqlDB, webCfg, as)
 

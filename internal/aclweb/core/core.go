@@ -41,6 +41,12 @@ type WebConfig struct {
 	// Plan files directory (shared with acl-agent).
 	PlanDir string
 
+	// RuleComment turns on the ACLSYS-REQ ownership comment written beneath each
+	// rule. It is off by default: the comment is a convenience for whoever reads
+	// the switch configuration by hand, not something the tool depends on, and it
+	// doubles the number of lines this tool adds to the device.
+	RuleComment bool
+
 	// Agent invocation timeout.
 	AgentTimeout time.Duration
 
@@ -158,7 +164,10 @@ func (s *Service) Submit(ctx context.Context, actor *auth.User, req SubmitReques
 		return 0, err
 	}
 
-	comment := buildComment(code, req.DstIP+req.DstWildcard+req.Protocol+req.DstPortOp+strconv.Itoa(req.DstPortVal))
+	var comment string
+	if s.cfg.RuleComment {
+		comment = buildComment(code, req.DstIP+req.DstWildcard+req.Protocol+req.DstPortOp+strconv.Itoa(req.DstPortVal))
+	}
 
 	p := plan.Plan{
 		RequestID:         code,
@@ -364,7 +373,6 @@ func (s *Service) SubmitDelete(ctx context.Context, actor *auth.User, existingCR
 		Op:                plan.OpDelete,
 		RuleID:            ruleID,
 		Action:            plan.ActionPermit,
-		Comment:           buildComment(code, fmt.Sprintf("delete-%d", ruleID)),
 		ExpectCountBefore: expectCount,
 	}
 	planJSON, err := json.Marshal(p)
