@@ -1,0 +1,36 @@
+{{template "base.html" .}}
+{{define "body"}}
+<nav>
+  <strong>ACL 审批系统</strong>
+  <a href="/requests">变更请求</a>
+  {{if eq .Actor.Role "admin"}}<a href="/admin/users">用户管理</a>{{end}}
+  <span class="sep"></span>
+  <span style="font-size:.85rem">{{.Actor.Username}} ({{.Actor.Role}})</span>
+  <form method="post" action="/logout" style="margin:0">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <button class="btn btn-outline" style="padding:4px 10px;font-size:.8rem">退出</button>
+  </form>
+</nav>
+<div class="container">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <h2 style="margin:0">变更请求列表</h2>
+    <a href="/requests/new" class="btn btn-primary">＋ 新建申请</a>
+  </div>
+  <div class="card" style="padding:0">
+    <table>
+      <tr><th>编号</th><th>操作</th><th>状态</th><th>申请人</th><th>目的地</th><th>Rule ID</th><th>时间</th></tr>
+      {{range .Items}}
+      <tr>
+        <td><a href="/requests/{{.ID}}">{{.Code}}</a></td>
+        <td>{{.Action}}</td>
+        <td><span class="badge badge-{{.State}}">{{.State}}</span></td>
+        <td>{{.Requester}}</td>
+        <td>{{.Reason}}</td>
+        <td>{{if .RuleID}}{{.RuleID}}{{else}}—{{end}}</td>
+        <td style="font-size:.8rem;color:#666">{{.CreatedAt}}</td>
+      </tr>
+      {{else}}<tr><td colspan="7" style="text-align:center;color:#888">暂无记录</td></tr>{{end}}
+    </table>
+  </div>
+</div>
+{{end}}

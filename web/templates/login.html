@@ -1,0 +1,21 @@
+{{template "base.html" .}}
+{{define "body"}}
+<div style="max-width:360px;margin:80px auto">
+  <div class="card">
+    <h2 style="margin-top:0">ACL 审批系统 · 登录</h2>
+    {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
+    {{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+    <form method="post" action="/login">
+      <div class="form-row">
+        <label>用户名</label>
+        <input name="username" autocomplete="username" required>
+      </div>
+      <div class="form-row">
+        <label>密码</label>
+        <input name="password" type="password" autocomplete="current-password" required>
+      </div>
+      <button class="btn btn-primary" style="width:100%">登录</button>
+    </form>
+  </div>
+</div>
+{{end}}

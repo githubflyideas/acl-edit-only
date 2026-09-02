@@ -1,0 +1,88 @@
+{{template "base.html" .}}
+{{define "body"}}
+<nav>
+  <strong>ACL 审批系统</strong>
+  <a href="/requests">变更请求</a>
+  <span class="sep"></span>
+  <span style="font-size:.85rem">{{.Actor.Username}} ({{.Actor.Role}})</span>
+</nav>
+<div class="container">
+  <h2>{{.D.Code}} <span class="badge badge-{{.D.State}}">{{.D.State}}</span></h2>
+
+  <div class="card">
+    <table>
+      <tr><th style="width:160px">操作类型</th><td>{{.D.Action}}</td></tr>
+      <tr><th>申请人</th><td>{{.D.Requester}}</td></tr>
+      <tr><th>审批人</th><td>{{if .D.Approver}}{{.D.Approver}}{{else}}—{{end}}</td></tr>
+      <tr><th>审批意见</th><td>{{if .D.ApproveComment}}{{.D.ApproveComment}}{{else}}—{{end}}</td></tr>
+      <tr><th>Rule ID</th><td>{{if .D.RuleID}}{{.D.RuleID}}{{else}}（待分配）{{end}}</td></tr>
+      <tr><th>协议</th><td>{{.D.Protocol}}</td></tr>
+      <tr><th>源 IP</th><td>{{if .D.SrcIP}}{{.D.SrcIP}}{{else}}any{{end}}</td></tr>
+      <tr><th>目的 IP</th><td>{{.D.DstIP}}</td></tr>
+      <tr><th>目的端口</th><td>{{if .D.DstPortOp}}{{.D.DstPortOp}} {{.D.DstPortVal}}{{else}}—{{end}}</td></tr>
+      <tr><th>申请理由</th><td>{{.D.Reason}}</td></tr>
+      <tr><th>Plan SHA-256</th><td style="font-size:.78rem;word-break:break-all">{{.D.PlanSHA256}}</td></tr>
+    </table>
+  </div>
+
+  {{if .D.DiffText}}
+  <div class="card">
+    <h3 style="margin-top:0">变更 Diff（审批依据）</h3>
+    <pre>{{.D.DiffText}}</pre>
+  </div>
+  {{end}}
+
+  {{if .CanApprove}}
+  <div class="card">
+    <h3 style="margin-top:0">审批操作</h3>
+    <form method="post" action="/approve" style="margin-bottom:12px">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <input type="hidden" name="cr_id" value="{{.D.ID}}">
+      <div class="form-row">
+        <label>审批意见</label>
+        <input name="comment" placeholder="可选">
+      </div>
+      <button class="btn btn-success" type="submit">通过</button>
+    </form>
+    <form method="post" action="/reject">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <input type="hidden" name="cr_id" value="{{.D.ID}}">
+      <div class="form-row">
+        <label>拒绝原因</label>
+        <input name="comment" required>
+      </div>
+      <button class="btn btn-danger" type="submit">拒绝</button>
+    </form>
+  </div>
+  {{end}}
+
+  {{if .CanDispatch}}
+  <div class="card">
+    <h3 style="margin-top:0">下发执行</h3>
+    <p style="color:#555;font-size:.9rem">下发后将通过 acl-agent 写入设备，并自动回读验证。请确认 diff 无误后再操作。</p>
+    <form method="post" action="/dispatch">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <input type="hidden" name="cr_id" value="{{.D.ID}}">
+      <button class="btn btn-primary" type="submit" onclick="return confirm('确认下发到设备？')">确认下发</button>
+    </form>
+  </div>
+  {{end}}
+
+  {{if eq .D.State "active"}}
+  <div class="card">
+    <h3 style="margin-top:0">删除规则</h3>
+    <form method="post" action="/requests/delete">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <input type="hidden" name="cr_id" value="{{.D.ID}}">
+      <div class="form-row">
+        <label>删除原因</label>
+        <input name="reason" required>
+      </div>
+      <button class="btn btn-danger" type="submit">申请删除</button>
+    </form>
+  </div>
+  {{end}}
+
+  <p><a href="/requests">← 返回列表</a></p>
+</div>
+{{end}}
