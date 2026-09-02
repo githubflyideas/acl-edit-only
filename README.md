@@ -144,7 +144,6 @@ journalctl -u aclweb | grep "INITIAL ADMIN"
 
 - 口令是 base64 编码，安全性依赖文件权限 `0400`
 - `acl-agent` 只在 Linux 上启动
-- 遇到分页（`---- More ----`）硬失败，不翻页
 - `save` 失败不自动回滚，报 `save_failed` 由人决定
 - 每条规则带 `ACLSYS-REQ-<code>-<8hex>` 注释，用于对账
 

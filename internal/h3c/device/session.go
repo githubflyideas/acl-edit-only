@@ -18,6 +18,8 @@ const (
 	promptSaveCFM  = "Y/N"
 )
 
+var moreLineRe = regexp.MustCompile(`(?m)\r?[ \t]*---- More ----[^\n]*`)
+
 var errorPatterns = []string{
 	"Error:", "% Error", "% Unrecognized command",
 	"% Wrong parameter", "% Too many", "^%",
@@ -72,10 +74,36 @@ func (s *Session) Open(ctx context.Context) error {
 }
 
 func (s *Session) DisplayACL(ctx context.Context) (string, error) {
-	if err := s.Exec(ctx, "screen-length disable", promptUserView, promptSysView); err != nil {
-		return "", err
+	// Send the display command; collect output across multiple pages.
+	if err := s.send(ctx, fmt.Sprintf("display acl %d\r\n", s.aclNum)); err != nil {
+		return "", &SessionError{Stage: "view", Cause: err}
 	}
-	return s.ExecOutput(ctx, fmt.Sprintf("display acl %d", s.aclNum), promptUserView, promptSysView)
+	var full strings.Builder
+	prompts := []string{promptUserView, promptSysView, promptMore}
+	for {
+		out, idx, err := s.tr.ReadUntil(ctx, prompts, time.Now().Add(s.timeout))
+		if !s.inAuth {
+			s.rawBuf.WriteString(out)
+			if s.stream != nil { s.stream.Write([]byte(out)) }
+		}
+		if err != nil { return full.String(), &SessionError{Stage: "view", Cause: err} }
+		// Strip the "---- More ----" line (device overwrites it with \r but keep text clean).
+		page := moreLineRe.ReplaceAllString(out, "")
+		full.WriteString(page)
+		if idx < 2 {
+			// Reached a normal prompt — done.
+			break
+		}
+		// idx == 2: hit "---- More ----", send space to continue.
+		if err := s.tr.Send(ctx, []byte{' '}); err != nil {
+			return full.String(), &SessionError{Stage: "view", Cause: err}
+		}
+	}
+	result := full.String()
+	if err := checkDeviceErrors(result); err != nil {
+		return result, &SessionError{Stage: "view", Cause: err}
+	}
+	return result, nil
 }
 
 func (s *Session) EnterSystemView(ctx context.Context) error {
@@ -144,12 +172,8 @@ func (s *Session) ExecOutput(ctx context.Context, cmd string, waitFor ...string)
 	if err := s.send(ctx, cmd+"\r\n"); err != nil {
 		return "", &SessionError{Stage: "write", Cause: err}
 	}
-	all := append(waitFor, promptMore)
-	out, idx, err := s.readUntil(ctx, all)
+	out, _, err := s.readUntil(ctx, waitFor)
 	if err != nil { return out, err }
-	if idx == len(waitFor) {
-		return out, &SessionError{Stage: "view", Cause: fmt.Errorf("paging detected – screen-length disable must be sent first")}
-	}
 	if err := checkDeviceErrors(out); err != nil {
 		return out, &SessionError{Stage: "write", Cause: err}
 	}
