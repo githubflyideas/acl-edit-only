@@ -491,3 +491,46 @@ func TestLoginRateLimitEngages(t *testing.T) {
 		t.Errorf("per-IP failure count = %d, want at least 10", count)
 	}
 }
+
+// A change approved against one configuration must not be applied to another.
+func TestDriftBetweenSubmitAndExecuteStopsTheChange(t *testing.T) {
+	h := newHarness(t, e2eRules(5))
+	h.login(t)
+	tok := h.csrf(t)
+
+	resp, err := h.cli.PostForm(h.srv.URL+"/requests/new", url.Values{
+		"csrf_token": {tok}, "protocol": {"ip"},
+		"dst_ip": {"10.99.2.8"}, "dst_wildcard": {"0.0.0.0"},
+		"reason": {"drift check"},
+	})
+	if err != nil { t.Fatal(err) }
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("submit status %d", resp.StatusCode)
+	}
+	crID := strings.TrimPrefix(resp.Header.Get("Location"), "/requests/")
+
+	// Someone edits the switch by hand after the diff was reviewed.
+	h.dev.SetRule(fakedev.Rule{
+		ID:      130,
+		Body:    "permit ip destination 10.77.0.1 0",
+		Comment: "added by hand during the change window",
+	})
+
+	term, done, sseErr := h.stream(t, crID, tok)
+	if done && sseErr == "" {
+		t.Fatalf("the change was executed against a configuration nobody approved\n%s", term)
+	}
+	var state string
+	if err := h.db.QueryRow(`SELECT state FROM change_requests WHERE id=?`, crID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "drift" {
+		t.Errorf("request state = %q, want drift", state)
+	}
+	for _, r := range h.dev.Rules() {
+		if r.Body == "permit ip destination 10.99.2.8 0" {
+			t.Error("the rule was written to the switch despite the drift")
+		}
+	}
+}

@@ -100,6 +100,15 @@ func (d *Device) Rules() []Rule {
 }
 
 // Commands returns every command line the device received.
+// SetRule adds or replaces a rule out of band, standing in for the engineer who
+// edits the switch by hand between a submission and its execution.
+func (d *Device) SetRule(r Rule) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	copy := r
+	d.rules[r.ID] = &copy
+}
+
 func (d *Device) Commands() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
