@@ -14,11 +14,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/githubflyideas/acl-edit-only/internal/aclweb/auth"
+	"github.com/githubflyideas/acl-edit-only/internal/h3c/device"
 	"github.com/githubflyideas/acl-edit-only/internal/h3c/plan"
 )
 
@@ -607,11 +609,16 @@ func occupiedIDs(raw string, lo, hi int) map[int]bool {
 	return ids
 }
 
+var ruleCountRe = regexp.MustCompile(`(\d+)\s+rules?`)
+
+// parseRuleCount returns the rule count from the ACL header, or -1 when the
+// output does not contain one. The distinction matters: an unreadable snapshot
+// must not be mistaken for an empty ACL.
 func parseRuleCount(raw string) int {
-	re := regexp.MustCompile(`(\d+)\s+rules?`)
-	m := re.FindStringSubmatch(raw)
-	if m == nil { return 0 }
-	n, _ := strconv.Atoi(m[1])
+	m := ruleCountRe.FindStringSubmatch(raw)
+	if m == nil { return -1 }
+	n, err := strconv.Atoi(m[1])
+	if err != nil { return -1 }
 	return n
 }
 
@@ -625,15 +632,62 @@ func ruleExistsInSnapshot(raw string, ruleID int) bool {
 
 // ─── Artifacts ───────────────────────────────────────────────────
 
+// renderRuleLine produces the exact command the agent will send. The predicted
+// config is built from this same function so the diff the operator approves
+// cannot drift from the change that is actually made.
+func renderRuleLine(p *plan.Plan) (string, error) {
+	return device.BuildRuleCmd(p)
+}
+
+// buildExpectedConfig predicts the post-change output of "display acl N":
+// the rule count in the header goes up by one and the new rule and its comment
+// appear in rule-ID order.
 func buildExpectedConfig(base string, p *plan.Plan) string {
-	// Append the expected new rule line and comment line.
-	line := fmt.Sprintf(" rule %d permit %s destination %s %s",
-		p.RuleID, p.Protocol, p.Dst.IP, p.Dst.Wildcard)
-	if p.DstPort != nil {
-		line += fmt.Sprintf(" destination-port %s %d", p.DstPort.Op, p.DstPort.Value)
+	cmd, err := renderRuleLine(p)
+	if err != nil {
+		// A plan that cannot be rendered cannot be dispatched either; surface
+		// the reason in the diff rather than showing a plausible-looking one.
+		return strings.TrimRight(base, "\n") + "\n" +
+			fmt.Sprintf(" !! cannot render rule %d: %v\n", p.RuleID, err)
 	}
-	comment := fmt.Sprintf(" rule %d comment %s", p.RuleID, p.Comment)
-	return strings.TrimRight(base, "\n") + "\n" + line + "\n" + comment + "\n"
+	newLines := []string{" " + cmd}
+	if p.Comment != "" {
+		newLines = append(newLines, fmt.Sprintf(" rule %d comment %s", p.RuleID, p.Comment))
+	}
+	lines := strings.Split(strings.TrimRight(base, "\n"), "\n")
+	out := make([]string, 0, len(lines)+len(newLines))
+	inserted := false
+	for _, l := range lines {
+		if !inserted {
+			if id, ok := ruleIDOfLine(l); ok && id > p.RuleID {
+				out = append(out, newLines...)
+				inserted = true
+			}
+		}
+		out = append(out, bumpRuleCount(l))
+	}
+	if !inserted {
+		out = append(out, newLines...)
+	}
+	return strings.Join(out, "\n") + "\n"
+}
+
+// bumpRuleCount rewrites the "N rules," header to N+1. Leaving it alone would
+// show a stale count as an unexplained context line in the diff.
+func bumpRuleCount(line string) string {
+	m := ruleCountRe.FindStringSubmatchIndex(line)
+	if m == nil { return line }
+	n, err := strconv.Atoi(line[m[2]:m[3]])
+	if err != nil { return line }
+	return line[:m[2]] + strconv.Itoa(n+1) + line[m[3]:]
+}
+
+func ruleIDOfLine(line string) (int, bool) {
+	m := ruleLineRe.FindStringSubmatch(line)
+	if m == nil { return 0, false }
+	id, err := strconv.Atoi(m[1])
+	if err != nil { return 0, false }
+	return id, true
 }
 
 func removeRuleFromConfig(base string, ruleID int) string {
@@ -645,38 +699,163 @@ func removeRuleFromConfig(base string, ruleID int) string {
 	return strings.Join(lines, "\n")
 }
 
+// unifiedDiff produces a unified diff with three lines of context, using a
+// longest-common-subsequence match. The previous implementation compared sets
+// of lines, which lost duplicate lines entirely and reported reorderings as no
+// change at all — unacceptable when this diff is the artifact a human approves.
 func unifiedDiff(a, b string) string {
-	aLines := strings.Split(a, "\n")
-	bLines := strings.Split(b, "\n")
+	aLines := splitKeep(a)
+	bLines := splitKeep(b)
+	ops := diffOps(aLines, bLines)
+
 	var out strings.Builder
 	out.WriteString("--- before\n+++ after\n")
-	// Simple line-by-line diff (good enough for review; not a full Myers diff).
-	aSet := make(map[string]bool)
-	bSet := make(map[string]bool)
-	for _, l := range aLines { aSet[l] = true }
-	for _, l := range bLines { bSet[l] = true }
-	for _, l := range aLines {
-		if !bSet[l] { fmt.Fprintf(&out, "-%s\n", l) }
+
+	const context = 3
+	// Mark which ops to print: every change plus `context` ops around it.
+	keep := make([]bool, len(ops))
+	for i, op := range ops {
+		if op.kind == opEqual { continue }
+		for j := i - context; j <= i+context; j++ {
+			if j >= 0 && j < len(ops) { keep[j] = true }
+		}
 	}
-	for _, l := range bLines {
-		if !aSet[l] { fmt.Fprintf(&out, "+%s\n", l) }
+	skipping := false
+	for i, op := range ops {
+		if !keep[i] {
+			if !skipping {
+				out.WriteString("@@\n")
+				skipping = true
+			}
+			continue
+		}
+		skipping = false
+		switch op.kind {
+		case opEqual:
+			fmt.Fprintf(&out, " %s\n", op.text)
+		case opDelete:
+			fmt.Fprintf(&out, "-%s\n", op.text)
+		case opInsert:
+			fmt.Fprintf(&out, "+%s\n", op.text)
+		}
 	}
 	return out.String()
 }
 
+// splitKeep splits into lines and drops a single trailing empty element, so a
+// trailing newline is not reported as a change.
+func splitKeep(s string) []string {
+	lines := strings.Split(s, "\n")
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1]
+	}
+	return lines
+}
+
+type opKind int
+
+const (
+	opEqual opKind = iota
+	opDelete
+	opInsert
+)
+
+type diffOp struct {
+	kind opKind
+	text string
+}
+
+// diffOps computes an LCS-based edit script. ACL snapshots are a few hundred
+// lines, so the quadratic table is cheap and the simplicity is worth more than
+// the speed of a Myers implementation.
+func diffOps(a, b []string) []diffOp {
+	n, m := len(a), len(b)
+	lcs := make([][]int, n+1)
+	for i := range lcs { lcs[i] = make([]int, m+1) }
+	for i := n - 1; i >= 0; i-- {
+		for j := m - 1; j >= 0; j-- {
+			if a[i] == b[j] {
+				lcs[i][j] = lcs[i+1][j+1] + 1
+			} else if lcs[i+1][j] >= lcs[i][j+1] {
+				lcs[i][j] = lcs[i+1][j]
+			} else {
+				lcs[i][j] = lcs[i][j+1]
+			}
+		}
+	}
+	var ops []diffOp
+	i, j := 0, 0
+	for i < n && j < m {
+		switch {
+		case a[i] == b[j]:
+			ops = append(ops, diffOp{opEqual, a[i]}); i++; j++
+		case lcs[i+1][j] >= lcs[i][j+1]:
+			ops = append(ops, diffOp{opDelete, a[i]}); i++
+		default:
+			ops = append(ops, diffOp{opInsert, b[j]}); j++
+		}
+	}
+	for ; i < n; i++ { ops = append(ops, diffOp{opDelete, a[i]}) }
+	for ; j < m; j++ { ops = append(ops, diffOp{opInsert, b[j]}) }
+	return ops
+}
+
+// verifyChange decides, from before/after snapshots alone, whether exactly the
+// approved change landed on the device. It deliberately does not consult the
+// agent's own report: the point is to check the device, not to check whether
+// the agent agrees with itself.
 func verifyChange(preRaw, postRaw string, ruleID int) error {
 	preCount := parseRuleCount(preRaw)
 	postCount := parseRuleCount(postRaw)
-	// Assertion A: N2 == N1 + 1
+	if preCount < 0 || postCount < 0 {
+		return fmt.Errorf("cannot parse rule count (pre=%d post=%d)", preCount, postCount)
+	}
+	// A: the rule count went up by exactly one.
 	if postCount != preCount+1 {
 		return fmt.Errorf("assertion A failed: pre count %d, post count %d", preCount, postCount)
 	}
-	// Assertion B: post without new rule == pre (crude: check counts of other rule lines)
-	// Assertion C: new rule exists in post
+	// C: the new rule is present.
 	if !ruleExistsInSnapshot(postRaw, ruleID) {
 		return fmt.Errorf("assertion C failed: rule %d not found in post-dispatch snapshot", ruleID)
 	}
+	// B: nothing else moved. Strip every line belonging to the new rule from
+	// the post-state and it must equal the pre-state, ignoring the header count
+	// that assertion A already accounted for. Without this check a dispatch
+	// that also modified an unrelated rule would be reported as success.
+	if err := assertOnlyRuleChanged(preRaw, postRaw, ruleID); err != nil {
+		return err
+	}
 	return nil
+}
+
+func assertOnlyRuleChanged(preRaw, postRaw string, ruleID int) error {
+	pre := significantLines(preRaw, ruleID)
+	post := significantLines(postRaw, ruleID)
+	if len(pre) != len(post) {
+		return fmt.Errorf("assertion B failed: %d unrelated lines before, %d after",
+			len(pre), len(post))
+	}
+	for i := range pre {
+		if pre[i] != post[i] {
+			return fmt.Errorf("assertion B failed: unrelated line changed\n  before: %s\n   after: %s",
+				pre[i], post[i])
+		}
+	}
+	return nil
+}
+
+// significantLines returns the comparable content of a snapshot: trimmed,
+// blank lines dropped, the header rule count neutralised, and every line
+// belonging to ruleID removed.
+func significantLines(raw string, ruleID int) []string {
+	var out []string
+	for _, l := range strings.Split(raw, "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" { continue }
+		if id, ok := ruleIDOfLine(l); ok && id == ruleID { continue }
+		out = append(out, ruleCountRe.ReplaceAllString(l, "N rules,"))
+	}
+	return out
 }
 
 func fingerprintRaw(raw string) string {
@@ -687,7 +866,7 @@ func fingerprintRaw(raw string) string {
 		l = strings.TrimSpace(l)
 		if l != "" { cleaned = append(cleaned, l) }
 	}
-	// sort not imported to keep deps minimal; use sha of joined sorted lines.
+	sort.Strings(cleaned)
 	joined := strings.Join(cleaned, "\n")
 	h := sha256.Sum256([]byte(joined))
 	return fmt.Sprintf("%x", h)
