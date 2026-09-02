@@ -443,3 +443,20 @@ func TestCSRFTokenIsNotTheSessionToken(t *testing.T) {
 		t.Error("the CSRF token is the session token; putting it in the SSE URL leaks the session")
 	}
 }
+
+// Reconcile logs into the switch. A viewer must not be able to start it.
+func TestReconcileIsRestrictedByRole(t *testing.T) {
+	h := newHarness(t, e2eRules(2))
+	h.login(t)
+	if _, err := h.db.Exec(`UPDATE users SET role='viewer' WHERE username='admin'`); err != nil {
+		t.Fatal(err)
+	}
+	tok := h.csrf(t)
+	resp, err := h.cli.PostForm(h.srv.URL+"/reconcile", url.Values{"csrf_token": {tok}})
+	if err != nil { t.Fatal(err) }
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("viewer reconcile = %d, want 403\n%s", resp.StatusCode, snippet(body))
+	}
+}

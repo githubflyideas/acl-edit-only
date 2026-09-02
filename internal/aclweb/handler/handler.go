@@ -452,8 +452,13 @@ func (h *Handler) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost { http.Error(w, "method not allowed", 405); return }
 	if err := h.checkCSRF(r); err != nil { http.Error(w, "CSRF", 403); return }
+	// Reconcile logs into the switch and rewrites request state from what it
+	// finds. requireSession alone let a viewer start it.
 	actor := r.Context().Value(ctxUser).(*auth.User)
-	_ = actor // already validated by requireSession
+	if !canDispatchRole(actor.Role) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	if err := h.svc.Reconcile(r.Context()); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
