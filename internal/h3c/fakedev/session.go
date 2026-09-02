@@ -29,10 +29,10 @@ func (d *Device) serve(c net.Conn) {
 	s.out("******************************************************************\r\n\r\n")
 
 	s.out("\r\nUsername:")
-	user, err := s.readLine()
+	user, err := s.readLine(true)
 	if err != nil { return }
 	s.out("\r\nPassword:")
-	pass, err := s.readLine()
+	pass, err := s.readLine(false)
 	if err != nil { return }
 	if strings.TrimSpace(user) != d.Username || pass != d.Password {
 		s.out("\r\n% Login failed.\r\n")
@@ -43,7 +43,7 @@ func (d *Device) serve(c net.Conn) {
 	s.prompt()
 
 	for {
-		line, err := s.readLine()
+		line, err := s.readLine(true)
 		if err != nil { return }
 		cmd := strings.TrimSpace(line)
 		if cmd == "" {
@@ -308,8 +308,11 @@ func (s *conn) readByte() (byte, error) {
 	}
 }
 
-// readLine reads until CR or LF, echoing like a real device.
-func (s *conn) readLine() (string, error) {
+// readLine reads until CR or LF. When echo is set the typed characters are
+// echoed back, which is what a real H3C does after IAC WILL ECHO — and it is
+// the only reason the operator watching the terminal sees the commands at all.
+// The password is read with echo off, the way the device suppresses it.
+func (s *conn) readLine(echo bool) (string, error) {
 	var sb strings.Builder
 	for {
 		b, err := s.readByte()
@@ -320,14 +323,21 @@ func (s *conn) readLine() (string, error) {
 			if nb, err := s.br.Peek(1); err == nil && len(nb) == 1 && (nb[0] == '\n' || nb[0] == 0) {
 				s.br.ReadByte() //nolint:errcheck
 			}
+			if echo { s.raw([]byte("\r\n")) }
 			return sb.String(), nil
 		case '\n':
+			if echo { s.raw([]byte("\r\n")) }
 			return sb.String(), nil
 		case 0x7f, 0x08:
 			cur := sb.String()
-			if cur != "" { sb.Reset(); sb.WriteString(cur[:len(cur)-1]) }
+			if cur != "" {
+				sb.Reset()
+				sb.WriteString(cur[:len(cur)-1])
+				if echo { s.raw([]byte("\b \b")) }
+			}
 		default:
 			sb.WriteByte(b)
+			if echo { s.raw(escape([]byte{b})) }
 		}
 	}
 }
