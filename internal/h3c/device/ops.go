@@ -53,8 +53,16 @@ func GuardCheck(ctx context.Context, s *Session, ruleID, expectCount int) error 
 func Apply(ctx context.Context, s *Session, p *plan.Plan, _ time.Duration) error {
 	ruleCmd, err := BuildRuleCmd(p)
 	if err != nil { return &SessionError{Stage: "write", Cause: err} }
-	commentCmd, err := BuildCommentCmd(p.RuleID, p.Comment)
-	if err != nil { return &SessionError{Stage: "comment", Cause: err} }
+
+	// The ownership comment is optional. A plan that carries none means the
+	// operator wants nothing but the rule itself left in the device
+	// configuration, so no comment command is built and the comment stage below
+	// is skipped entirely.
+	var commentCmd string
+	if p.Comment != "" {
+		commentCmd, err = BuildCommentCmd(p.RuleID, p.Comment)
+		if err != nil { return &SessionError{Stage: "comment", Cause: err} }
+	}
 
 	if err := s.EnterSystemView(ctx); err != nil { return err }
 	if err := s.EnterACLView(ctx); err != nil { return err }
@@ -63,13 +71,15 @@ func Apply(ctx context.Context, s *Session, p *plan.Plan, _ time.Duration) error
 	if err := s.ExecRule(ctx, ruleCmd); err != nil {
 		return &SessionError{Stage: "write", Cause: err}
 	}
-	if err := s.ExecComment(ctx, commentCmd); err != nil {
-		undoErr := s.ExecUndoRule(ctx, BuildUndoRuleCmd(p.RuleID))
-		if undoErr != nil {
-			return &SessionError{Stage: "comment",
-				Cause: fmt.Errorf("comment failed + undo failed: %v / %v", err, undoErr)}
+	if commentCmd != "" {
+		if err := s.ExecComment(ctx, commentCmd); err != nil {
+			undoErr := s.ExecUndoRule(ctx, BuildUndoRuleCmd(p.RuleID))
+			if undoErr != nil {
+				return &SessionError{Stage: "comment",
+					Cause: fmt.Errorf("comment failed + undo failed: %v / %v", err, undoErr)}
+			}
+			return &SessionError{Stage: "comment", Cause: fmt.Errorf("comment failed, rule undone: %w", err)}
 		}
-		return &SessionError{Stage: "comment", Cause: fmt.Errorf("comment failed, rule undone: %w", err)}
 	}
 	if err := s.QuitACLView(ctx); err != nil { return err }
 	if err := s.QuitSysView(ctx); err != nil { return err }

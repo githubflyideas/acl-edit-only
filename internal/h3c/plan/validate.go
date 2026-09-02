@@ -38,7 +38,13 @@ func ValidateForAgent(p *Plan, rangeMin, rangeMax, allocMax int) error {
 	return nil
 }
 
+// ValidateComment checks the ownership-mark format. An empty comment is legal:
+// writing a comment is optional, and a plan carrying none tells the agent to
+// leave no extra lines in the device configuration.
 func ValidateComment(s string) error {
+	if s == "" {
+		return nil
+	}
 	if !commentRe.MatchString(s) {
 		return fmt.Errorf("comment %q does not match ownership-mark format", s)
 	}

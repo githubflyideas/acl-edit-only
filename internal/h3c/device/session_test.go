@@ -320,3 +320,43 @@ func TestPagingSurvivesPromptCharactersInOutput(t *testing.T) {
 		t.Fatalf("output truncated at a '>' inside a comment; highest rule lost:\n%s", tail(raw))
 	}
 }
+
+// TestApplyWithoutComment covers the case where the operator does not want the
+// tool leaving ownership marks in the device configuration. An empty comment
+// must be accepted and must produce exactly one new line on the device: the
+// rule itself, with no "rule N comment" line following it.
+func TestApplyWithoutComment(t *testing.T) {
+	// The existing rules deliberately carry no comments either, so that finding
+	// the word "comment" anywhere in the session transcript is proof that Apply
+	// sent one.
+	base := bigACL(5)
+	for i := range base { base[i].Comment = "" }
+	d := fakedev.New("SW-CORE01", testACL, testUser, testPass, base)
+	s := dial(t, d)
+	p := &plan.Plan{
+		RequestID: "CR-000009", Op: plan.OpAdd, RuleID: 105, Action: plan.ActionPermit,
+		Protocol: "tcp",
+		Dst:      &plan.AddrMask{IP: "10.99.1.7", Wildcard: "0"},
+		DstPort:  &plan.PortCond{Op: "eq", Value: 8443},
+		ExpectCountBefore: 5,
+	}
+	if err := device.Apply(context.Background(), s, p, 0); err != nil {
+		t.Fatalf("Apply with no comment: %v\n--- session ---\n%s", err, tail(s.RawOutput()))
+	}
+	var got *fakedev.Rule
+	for _, r := range d.Rules() {
+		if r.ID == 105 { rr := r; got = &rr }
+	}
+	if got == nil {
+		t.Fatalf("rule 105 not created; device has %v", d.Rules())
+	}
+	if got.Comment != "" {
+		t.Errorf("comment = %q, want none", got.Comment)
+	}
+	if strings.Contains(s.RawOutput(), "comment") {
+		t.Errorf("a comment command was sent anyway:\n%s", tail(s.RawOutput()))
+	}
+	if !d.Saved {
+		t.Error("configuration was not saved")
+	}
+}
