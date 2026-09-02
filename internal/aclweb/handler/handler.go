@@ -325,8 +325,11 @@ func (h *Handler) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&u.ID, &u.Username, &u.Role, &u.Active)
 		users = append(users, u)
 	}
+	// The actor is passed typed, the way every other page passes it: templates
+	// cannot perform a type assertion, and an interface value here is what made
+	// admin_users.html reach for Go syntax and break the whole template set.
 	h.render(w, r, "admin_users.html", map[string]interface{}{
-		"Users": users, "Actor": r.Context().Value(ctxUser), "CSRF": csrfToken(r),
+		"Users": users, "Actor": r.Context().Value(ctxUser).(*auth.User), "CSRF": csrfToken(r),
 	})
 }
 
