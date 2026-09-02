@@ -175,10 +175,10 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleRequests(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.QueryContext(r.Context(), `
 		SELECT cr.id, cr.request_code, cr.action, cr.state, cr.reason,
-		       cr.rule_id, u.username, cr.created_at
+		       cr.rule_id, u.username, cr.submitted_at
 		FROM change_requests cr
 		JOIN users u ON u.id = cr.requester_id
-		ORDER BY cr.created_at DESC LIMIT 200`)
+		ORDER BY cr.submitted_at DESC LIMIT 200`)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -287,7 +287,7 @@ func (h *Handler) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
 		SELECT cr.id, cr.request_code, cr.action, cr.state, cr.reason,
 		       cr.protocol, cr.src_ip, cr.dst_ip,
 		       cr.src_port_op, cr.src_port_val, cr.dst_port_op, cr.dst_port_val,
-		       req.username, COALESCE(app.username,''), cr.approve_comment, cr.rule_id, cr.created_at,
+		       req.username, COALESCE(app.username,''), cr.approve_comment, cr.rule_id, cr.submitted_at,
 		       ca.diff_text, ca.plan_json, ca.plan_sha256
 		FROM change_requests cr
 		JOIN users req ON req.id = cr.requester_id
