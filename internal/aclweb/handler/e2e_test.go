@@ -460,3 +460,34 @@ func TestReconcileIsRestrictedByRole(t *testing.T) {
 		t.Fatalf("viewer reconcile = %d, want 403\n%s", resp.StatusCode, snippet(body))
 	}
 }
+
+// The login rate limiter is a security control that had never been executed.
+func TestLoginRateLimitEngages(t *testing.T) {
+	h := newHarness(t, e2eRules(2))
+	// A username that does not exist keeps bcrypt out of the loop, so this
+	// exercises the limiter rather than the hash cost.
+	for i := 0; i < 10; i++ {
+		resp, err := h.cli.PostForm(h.srv.URL+"/login", url.Values{
+			"username": {"nobody"}, "password": {"wrong"},
+		})
+		if err != nil { t.Fatal(err) }
+		resp.Body.Close()
+	}
+	// The per-IP counter is now at the limit, so even the real password must be
+	// refused for the rest of the window.
+	resp, err := h.cli.PostForm(h.srv.URL+"/login", url.Values{
+		"username": {"admin"}, "password": {h.pass},
+	})
+	if err != nil { t.Fatal(err) }
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusSeeOther {
+		t.Error("login succeeded after ten failed attempts from the same address")
+	}
+	var count int
+	if err := h.db.QueryRow(`SELECT count FROM rate_limits WHERE key='ip:127.0.0.1'`).Scan(&count); err != nil {
+		t.Fatalf("no per-IP rate limit record was written: %v", err)
+	}
+	if count < 10 {
+		t.Errorf("per-IP failure count = %d, want at least 10", count)
+	}
+}
