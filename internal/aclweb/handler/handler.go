@@ -5,6 +5,10 @@ package handler
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -41,6 +45,11 @@ type Handler struct {
 	// same page.
 	pages map[string]*template.Template
 
+	// csrfKey derives CSRF tokens from session tokens. It lives only in memory,
+	// so a restart invalidates outstanding forms; that is a page reload for the
+	// operator and no weaker than the session it protects.
+	csrfKey []byte
+
 	// dispatchMu ensures only one acl-agent subprocess runs at a time.
 	dispatchMu sync.Mutex
 }
@@ -50,7 +59,11 @@ func New(db *sql.DB, svc *core.Service, as *auth.Service, tplFS fs.FS) (*Handler
 	if err != nil {
 		return nil, err
 	}
-	return &Handler{db: db, svc: svc, auths: as, pages: pages}, nil
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, fmt.Errorf("csrf key: %w", err)
+	}
+	return &Handler{db: db, svc: svc, auths: as, pages: pages, csrfKey: key}, nil
 }
 
 // parsePages builds one template set per page file, each carrying its own copy
@@ -204,7 +217,7 @@ func (h *Handler) handleRequests(w http.ResponseWriter, r *http.Request) {
 	h.render(w, r, "requests.html", map[string]interface{}{
 		"Items": items,
 		"Actor": actor,
-		"CSRF":  csrfToken(r),
+		"CSRF":  h.csrfToken(r),
 	})
 }
 
@@ -212,7 +225,7 @@ func (h *Handler) handleNewRequest(w http.ResponseWriter, r *http.Request) {
 	actor := r.Context().Value(ctxUser).(*auth.User)
 	if r.Method == http.MethodGet {
 		h.render(w, r, "new_request.html", map[string]interface{}{
-			"Actor": actor, "CSRF": csrfToken(r),
+			"Actor": actor, "CSRF": h.csrfToken(r),
 		})
 		return
 	}
@@ -220,7 +233,7 @@ func (h *Handler) handleNewRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := checkCSRF(r); err != nil {
+	if err := h.checkCSRF(r); err != nil {
 		http.Error(w, "CSRF check failed", http.StatusForbidden)
 		return
 	}
@@ -242,7 +255,7 @@ func (h *Handler) handleNewRequest(w http.ResponseWriter, r *http.Request) {
 	id, err := h.svc.Submit(r.Context(), actor, req)
 	if err != nil {
 		h.render(w, r, "new_request.html", map[string]interface{}{
-			"Actor": actor, "CSRF": csrfToken(r), "Error": err.Error(),
+			"Actor": actor, "CSRF": h.csrfToken(r), "Error": err.Error(),
 		})
 		return
 	}
@@ -251,7 +264,7 @@ func (h *Handler) handleNewRequest(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleDeleteRequest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost { http.Error(w, "method not allowed", 405); return }
-	if err := checkCSRF(r); err != nil { http.Error(w, "CSRF", 403); return }
+	if err := h.checkCSRF(r); err != nil { http.Error(w, "CSRF", 403); return }
 	actor := r.Context().Value(ctxUser).(*auth.User)
 	existingID, _ := strconv.ParseInt(r.FormValue("cr_id"), 10, 64)
 	id, err := h.svc.SubmitDelete(r.Context(), actor, existingID, r.FormValue("reason"))
@@ -325,7 +338,7 @@ func (h *Handler) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
 
 	actor := r.Context().Value(ctxUser).(*auth.User)
 	h.render(w, r, "request_detail.html", map[string]interface{}{
-		"D": d, "Actor": actor, "CSRF": csrfToken(r),
+		"D": d, "Actor": actor, "CSRF": h.csrfToken(r),
 		"CanExecute": d.State == "pending" || d.State == "approved",
 	})
 }
@@ -334,7 +347,7 @@ func (h *Handler) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleApprove(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost { http.Error(w, "method not allowed", 405); return }
-	if err := checkCSRF(r); err != nil { http.Error(w, "CSRF", 403); return }
+	if err := h.checkCSRF(r); err != nil { http.Error(w, "CSRF", 403); return }
 	actor := r.Context().Value(ctxUser).(*auth.User)
 	id, _ := strconv.ParseInt(r.FormValue("cr_id"), 10, 64)
 	comment := r.FormValue("comment")
@@ -347,7 +360,7 @@ func (h *Handler) handleApprove(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleReject(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost { http.Error(w, "method not allowed", 405); return }
-	if err := checkCSRF(r); err != nil { http.Error(w, "CSRF", 403); return }
+	if err := h.checkCSRF(r); err != nil { http.Error(w, "CSRF", 403); return }
 	actor := r.Context().Value(ctxUser).(*auth.User)
 	id, _ := strconv.ParseInt(r.FormValue("cr_id"), 10, 64)
 	if err := h.svc.Reject(r.Context(), actor, id, r.FormValue("comment")); err != nil {
@@ -359,7 +372,7 @@ func (h *Handler) handleReject(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost { http.Error(w, "method not allowed", 405); return }
-	if err := checkCSRF(r); err != nil { http.Error(w, "CSRF", 403); return }
+	if err := h.checkCSRF(r); err != nil { http.Error(w, "CSRF", 403); return }
 	actor := r.Context().Value(ctxUser).(*auth.User)
 	id, _ := strconv.ParseInt(r.FormValue("cr_id"), 10, 64)
 
@@ -392,13 +405,13 @@ func (h *Handler) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	// cannot perform a type assertion, and an interface value here is what made
 	// admin_users.html reach for Go syntax and break the whole template set.
 	h.render(w, r, "admin_users.html", map[string]interface{}{
-		"Users": users, "Actor": r.Context().Value(ctxUser).(*auth.User), "CSRF": csrfToken(r),
+		"Users": users, "Actor": r.Context().Value(ctxUser).(*auth.User), "CSRF": h.csrfToken(r),
 	})
 }
 
 func (h *Handler) handleAdminNewUser(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost { http.Error(w, "method not allowed", 405); return }
-	if err := checkCSRF(r); err != nil { http.Error(w, "CSRF", 403); return }
+	if err := h.checkCSRF(r); err != nil { http.Error(w, "CSRF", 403); return }
 	_ = r.Context().Value(ctxUser)
 	username := strings.TrimSpace(r.FormValue("username"))
 	role := r.FormValue("role")
@@ -412,7 +425,7 @@ func (h *Handler) handleAdminNewUser(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleAdminToggleUser(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost { http.Error(w, "method not allowed", 405); return }
-	if err := checkCSRF(r); err != nil { http.Error(w, "CSRF", 403); return }
+	if err := h.checkCSRF(r); err != nil { http.Error(w, "CSRF", 403); return }
 	actor := r.Context().Value(ctxUser).(*auth.User)
 	targetID, _ := strconv.ParseInt(r.FormValue("user_id"), 10, 64)
 	active := r.FormValue("active") == "1"
@@ -425,7 +438,7 @@ func (h *Handler) handleAdminToggleUser(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost { http.Error(w, "method not allowed", 405); return }
-	if err := checkCSRF(r); err != nil { http.Error(w, "CSRF", 403); return }
+	if err := h.checkCSRF(r); err != nil { http.Error(w, "CSRF", 403); return }
 	actor := r.Context().Value(ctxUser).(*auth.User)
 	oldPw := r.FormValue("old_password")
 	newPw := r.FormValue("new_password")
@@ -438,7 +451,7 @@ func (h *Handler) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost { http.Error(w, "method not allowed", 405); return }
-	if err := checkCSRF(r); err != nil { http.Error(w, "CSRF", 403); return }
+	if err := h.checkCSRF(r); err != nil { http.Error(w, "CSRF", 403); return }
 	actor := r.Context().Value(ctxUser).(*auth.User)
 	_ = actor // already validated by requireSession
 	if err := h.svc.Reconcile(r.Context()); err != nil {
@@ -506,19 +519,25 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, name string, da
 
 // ─── CSRF helpers ─────────────────────────────────────────────────
 
-// csrfToken returns the per-session CSRF token embedded in the session cookie.
-// For simplicity we use the session token itself as the CSRF token (double-submit cookie).
-func csrfToken(r *http.Request) string {
-	if cookie, err := r.Cookie("session"); err == nil {
-		return cookie.Value
+// csrfToken returns the CSRF token for this request's session. It is derived
+// from the session token with a per-process key rather than being the session
+// token itself: the token is passed in the query string of the SSE endpoint,
+// where it would otherwise be written to access logs, proxy logs and any
+// Referer the browser sends, handing the session to anyone who reads them.
+func (h *Handler) csrfToken(r *http.Request) string {
+	cookie, err := r.Cookie("session")
+	if err != nil || cookie.Value == "" {
+		return ""
 	}
-	return ""
+	mac := hmac.New(sha256.New, h.csrfKey)
+	mac.Write([]byte(cookie.Value))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func checkCSRF(r *http.Request) error {
+func (h *Handler) checkCSRF(r *http.Request) error {
 	tok := r.FormValue("csrf_token")
-	cookie, err := r.Cookie("session")
-	if err != nil || tok == "" || tok != cookie.Value {
+	want := h.csrfToken(r)
+	if tok == "" || want == "" || !hmac.Equal([]byte(tok), []byte(want)) {
 		return fmt.Errorf("csrf mismatch")
 	}
 	return nil

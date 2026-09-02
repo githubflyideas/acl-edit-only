@@ -16,10 +16,10 @@ import (
 // handleDispatchSSE handles GET /dispatch/stream?cr_id=N&csrf_token=…
 // Streams acl-agent terminal output via SSE so the browser shows it live.
 func (h *Handler) handleDispatchSSE(w http.ResponseWriter, r *http.Request) {
-	// Validate CSRF via query param (SSE uses GET, no form body).
-	tok := r.URL.Query().Get("csrf_token")
-	cookie, err := r.Cookie("session")
-	if err != nil || tok == "" || tok != cookie.Value {
+	// Validate CSRF via query param (SSE uses GET, no form body). FormValue
+	// reads the query for a GET, so the same derived-token check applies here
+	// as everywhere else.
+	if err := h.checkCSRF(r); err != nil {
 		http.Error(w, "CSRF check failed", http.StatusForbidden)
 		return
 	}

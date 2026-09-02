@@ -178,14 +178,18 @@ func (h *harness) get(t *testing.T, path string) (int, string) {
 	return resp.StatusCode, string(body)
 }
 
+// csrf scrapes the token out of a rendered page, the way a browser would carry
+// it back, rather than assuming what it is derived from.
 func (h *harness) csrf(t *testing.T) string {
 	t.Helper()
-	u, _ := url.Parse(h.srv.URL)
-	for _, c := range h.cli.Jar.Cookies(u) {
-		if c.Name == "session" { return c.Value }
-	}
-	t.Fatal("no session cookie")
-	return ""
+	_, body := h.get(t, "/requests")
+	const marker = `name="csrf_token" value="`
+	i := strings.Index(body, marker)
+	if i < 0 { t.Fatal("no csrf token on the request list page") }
+	rest := body[i+len(marker):]
+	j := strings.Index(rest, `"`)
+	if j <= 0 { t.Fatal("empty csrf token") }
+	return rest[:j]
 }
 
 func snippet(b []byte) string {
@@ -415,4 +419,27 @@ func TestChangePasswordRequiresTheOldOne(t *testing.T) {
 	jar, _ := cookiejar.New(nil)
 	h.cli.Jar = jar
 	h.login(t)
+}
+
+// The CSRF token travels in the SSE query string, so it must not be the session
+// token itself: query strings land in access logs, proxy logs and Referer.
+func TestCSRFTokenIsNotTheSessionToken(t *testing.T) {
+	h := newHarness(t, e2eRules(2))
+	h.login(t)
+	var session string
+	u, _ := url.Parse(h.srv.URL)
+	for _, c := range h.cli.Jar.Cookies(u) {
+		if c.Name == "session" { session = c.Value }
+	}
+	if session == "" { t.Fatal("no session cookie") }
+
+	_, body := h.get(t, "/requests")
+	i := strings.Index(body, `name="csrf_token" value="`)
+	if i < 0 { t.Fatal("no csrf token rendered on the request list page") }
+	rest := body[i+len(`name="csrf_token" value="`):]
+	tok := rest[:strings.Index(rest, `"`)]
+	if tok == "" { t.Fatal("empty csrf token") }
+	if tok == session {
+		t.Error("the CSRF token is the session token; putting it in the SSE URL leaks the session")
+	}
 }
