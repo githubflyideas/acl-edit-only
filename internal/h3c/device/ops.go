@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/githubflyideas/acl-edit-only/internal/h3c/aclout"
 	"github.com/githubflyideas/acl-edit-only/internal/h3c/plan"
 )
 
@@ -22,10 +22,13 @@ func Snapshot(ctx context.Context, s *Session) (string, error) {
 	return s.DisplayACL(ctx)
 }
 
-func HeaderCount(displayOut string) int {
-	m := ruleCountRe.FindStringSubmatch(displayOut)
-	if m == nil { return -1 }
-	n, _ := strconv.Atoi(m[1])
+// HeaderCount reports how many rules the output shows, or -1 when the output
+// cannot be read as this ACL at all. Counting goes through package aclout because
+// the number compared here was produced by the web side using the same code: two
+// implementations that disagreed would fail the guard on a correct device.
+func HeaderCount(displayOut string, aclNum int) int {
+	n, err := aclout.Count(displayOut, aclNum)
+	if err != nil { return -1 }
 	return n
 }
 
@@ -39,9 +42,9 @@ func GuardCheck(ctx context.Context, s *Session, ruleID, expectCount int) error 
 				Cause: fmt.Errorf("guard_failed: rule %d already exists", ruleID)}
 		}
 	}
-	count := HeaderCount(out)
-	if count < 0 {
-		return &SessionError{Stage: "view", Cause: fmt.Errorf("guard_failed: cannot parse rule count")}
+	count, err := aclout.Count(out, s.aclNum)
+	if err != nil {
+		return &SessionError{Stage: "view", Cause: fmt.Errorf("guard_failed: %w", err)}
 	}
 	if count != expectCount {
 		return &SessionError{Stage: "view",

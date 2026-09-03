@@ -18,26 +18,28 @@ ACL's step is 5
  rule 104 permit ip destination 10.20.0.5 0
 `
 
-func TestParseRuleCountSignalsFailure(t *testing.T) {
-	if got := parseRuleCount(snap5); got != 5 {
-		t.Fatalf("parseRuleCount = %d, want 5", got)
-	}
-	// An unparseable snapshot must be distinguishable from an empty ACL,
-	// otherwise the guard in allocateRuleID never fires and the plan carries
-	// expect_count_before = 0 to the device.
-	if got := parseRuleCount("connection reset by peer"); got >= 0 {
-		t.Fatalf("parseRuleCount on garbage = %d, want negative", got)
-	}
-}
-
 func TestAllocateRuleIDRejectsUnparseableSnapshot(t *testing.T) {
-	if _, err := allocateRuleID("garbage output", 100, 199); err == nil {
+	if _, err := allocateRuleID("garbage output", 3977, 100, 199); err == nil {
 		t.Fatal("allocation accepted an unparseable snapshot")
 	}
 }
 
+// TestAllocateRuleIDIntoAnEmptyACL is the case a real deployment hit on day one:
+// a freshly created ACL with nothing in it. Allocation must start at the bottom
+// of the window rather than refusing to allocate at all.
+func TestAllocateRuleIDIntoAnEmptyACL(t *testing.T) {
+	for _, raw := range []string{
+		"Advanced IPv4 ACL 3977, named -, 0 rules,\nACL's step is 5\n",
+		"Advanced IPv4 ACL 3977, named -,\nACL's step is 5\n",
+	} {
+		got, err := allocateRuleID(raw, 3977, 100, 199)
+		if err != nil { t.Fatalf("allocateRuleID(%q): %v", raw, err) }
+		if got != 100 { t.Errorf("allocated %d, want 100 (the bottom of the window)", got) }
+	}
+}
+
 func TestAllocateRuleID(t *testing.T) {
-	got, err := allocateRuleID(snap5, 100, 199)
+	got, err := allocateRuleID(snap5, 3977, 100, 199)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +50,7 @@ func TestAllocateRuleID(t *testing.T) {
 
 func TestAllocateRuleIDIgnoresRulesOutsideWindow(t *testing.T) {
 	raw := snap5 + " rule 900 permit ip destination 10.30.0.1 0\n"
-	got, err := allocateRuleID(raw, 100, 199)
+	got, err := allocateRuleID(raw, 3977, 100, 199)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +61,7 @@ func TestAllocateRuleIDIgnoresRulesOutsideWindow(t *testing.T) {
 
 func TestAllocateRuleIDWindowExhausted(t *testing.T) {
 	raw := "1 rules,\n rule 199 permit ip destination 10.0.0.1 0\n"
-	if _, err := allocateRuleID(raw, 100, 199); err == nil {
+	if _, err := allocateRuleID(raw, 3977, 100, 199); err == nil {
 		t.Fatal("expected exhaustion error")
 	}
 }
@@ -163,7 +165,7 @@ func TestVerifyChangeRejectsCollateralEdits(t *testing.T) {
 	post = strings.Replace(post, " rule 102 permit ip destination 10.20.0.3 0",
 		" rule 102 permit ip destination 10.20.99.3 0", 1)
 	post += " rule 105 permit ip destination 10.99.1.7 0\n"
-	if err := verifyChange(pre, post, 105); err == nil {
+	if err := verifyChange(pre, post, 3977, 105); err == nil {
 		t.Fatal("verifyChange accepted a post-state where another rule changed")
 	}
 }
@@ -173,7 +175,7 @@ func TestVerifyChangeAcceptsCleanAddition(t *testing.T) {
 	post := strings.Replace(snap5, "5 rules,", "6 rules,", 1) +
 		" rule 105 permit ip destination 10.99.1.7 0\n" +
 		" rule 105 comment ACLSYS-REQ-CR-000006-cccccccc\n"
-	if err := verifyChange(pre, post, 105); err != nil {
+	if err := verifyChange(pre, post, 3977, 105); err != nil {
 		t.Fatalf("verifyChange rejected a clean addition: %v", err)
 	}
 }

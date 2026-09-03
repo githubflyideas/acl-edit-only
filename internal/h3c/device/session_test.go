@@ -58,7 +58,7 @@ func TestOpenAndSnapshotSmallACL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-	if n := device.HeaderCount(raw); n != 3 {
+	if n := device.HeaderCount(raw, 3977); n != 3 {
 		t.Fatalf("HeaderCount = %d, want 3\n---\n%s", n, raw)
 	}
 	if !strings.Contains(raw, "rule 102 permit tcp") {
@@ -90,7 +90,7 @@ func TestSnapshotPagedACL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-	if got := device.HeaderCount(raw); got != n {
+	if got := device.HeaderCount(raw, 3977); got != n {
 		t.Fatalf("HeaderCount = %d, want %d", got, n)
 	}
 	for _, id := range []int{100, 100 + n/2, 100 + n - 1} {
@@ -114,7 +114,7 @@ func TestDisplayACLPagesWithSpace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DisplayACL: %v", err)
 	}
-	if got := device.HeaderCount(raw); got != n {
+	if got := device.HeaderCount(raw, 3977); got != n {
 		t.Fatalf("HeaderCount = %d, want %d", got, n)
 	}
 	if !strings.Contains(raw, fmt.Sprintf("rule %d permit", 100+n-1)) {
@@ -288,7 +288,7 @@ func TestSnapshotWorksWithoutScreenLengthDisable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
-	if got := device.HeaderCount(raw); got != n {
+	if got := device.HeaderCount(raw, 3977); got != n {
 		t.Fatalf("HeaderCount = %d, want %d", got, n)
 	}
 	if !strings.Contains(raw, fmt.Sprintf("rule %d permit", 100+n-1)) {
@@ -313,7 +313,7 @@ func TestPagingSurvivesPromptCharactersInOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DisplayACL: %v", err)
 	}
-	if got := device.HeaderCount(raw); got != 30 {
+	if got := device.HeaderCount(raw, 3977); got != 30 {
 		t.Fatalf("HeaderCount = %d, want 30", got)
 	}
 	if !strings.Contains(raw, "rule 129 permit") {

@@ -23,6 +23,7 @@ import (
 
 	"github.com/githubflyideas/acl-edit-only/internal/aclweb/auth"
 	"github.com/githubflyideas/acl-edit-only/internal/h3c/device"
+	"github.com/githubflyideas/acl-edit-only/internal/h3c/aclout"
 	"github.com/githubflyideas/acl-edit-only/internal/h3c/plan"
 )
 
@@ -130,11 +131,10 @@ func (s *Service) Submit(ctx context.Context, actor *auth.User, req SubmitReques
 	}
 
 	// Allocate rule ID from snapshot (max+1 in alloc window).
-	ruleID, err := allocateRuleID(snapshotRaw, s.cfg.RangeMin, s.cfg.AllocMax)
-	if err != nil {
-		return 0, fmt.Errorf("rule ID allocation: %w", err)
-	}
-	expectCount := parseRuleCount(snapshotRaw)
+	ruleID, err := allocateRuleID(snapshotRaw, s.cfg.ACL, s.cfg.RangeMin, s.cfg.AllocMax)
+	if err != nil { return 0, err }
+	expectCount, err := aclout.Count(snapshotRaw, s.cfg.ACL)
+	if err != nil { return 0, err }
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil { return 0, err }
@@ -345,10 +345,8 @@ func (s *Service) SubmitDelete(ctx context.Context, actor *auth.User, existingCR
 		return 0, fmt.Errorf("rule %d not found in current device snapshot", ruleID)
 	}
 
-	expectCount := parseRuleCount(snapshotRaw)
-	if expectCount < 0 {
-		return 0, fmt.Errorf("cannot parse rule count from snapshot")
-	}
+	expectCount, err := aclout.Count(snapshotRaw, s.cfg.ACL)
+	if err != nil { return 0, err }
 	snapshotID, _ := s.saveSnapshot(snapshotRaw, "pre_request")
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -541,7 +539,11 @@ func (t *tailWriter) String() string { return string(t.buf) }
 
 func (s *Service) saveSnapshot(raw, trigger string) (int64, error) {
 	fp := fingerprintRaw(raw)
-	count := parseRuleCount(raw)
+	// A snapshot is stored even when its rule count cannot be read: it is the
+	// evidence of what the device said, and that is most valuable exactly when
+	// what it said made no sense. -1 records that the count is unknown.
+	count, err := aclout.Count(raw, s.cfg.ACL)
+	if err != nil { count = -1 }
 	res, err := s.db.Exec(
 		`INSERT INTO acl_snapshots(acl_num, raw_text, fingerprint, rule_count, trigger) VALUES(?,?,?,?,?)`,
 		s.cfg.ACL, raw, fp, count, trigger,
@@ -590,10 +592,14 @@ func (s *Service) auditDirect(actor *auth.User, entity string, entityID int64, e
 
 var ruleLineRe = regexp.MustCompile(`(?m)^\s*rule\s+(\d+)\s+`)
 
-// allocateRuleID implements max+1 in the [rangeMin, allocMax] window.
-func allocateRuleID(snapshotRaw string, rangeMin, allocMax int) (int, error) {
-	count := parseRuleCount(snapshotRaw)
-	if count < 0 { return 0, fmt.Errorf("cannot parse rule count from snapshot") }
+// allocateRuleID implements max+1 in the [rangeMin, allocMax] window. An empty
+// ACL allocates rangeMin: the count is read only to establish that the snapshot
+// is a real reading of the ACL, so that unreadable output cannot be taken for an
+// ACL with nothing in it.
+func allocateRuleID(snapshotRaw string, aclNum, rangeMin, allocMax int) (int, error) {
+	if _, err := aclout.Count(snapshotRaw, aclNum); err != nil {
+		return 0, fmt.Errorf("rule ID allocation: %w", err)
+	}
 
 	occupied := occupiedIDs(snapshotRaw, rangeMin, allocMax)
 
@@ -621,18 +627,14 @@ func occupiedIDs(raw string, lo, hi int) map[int]bool {
 	return ids
 }
 
-var ruleCountRe = regexp.MustCompile(`(\d+)\s+rules?`)
+// ruleCountRe matches the "N rules," clause on a single line. It is used only to
+// rewrite that clause; reading a count goes through package aclout, which both
+// this side and the device side share.
+var ruleCountRe = regexp.MustCompile(`(?m)(\d+)[ \t]+rules?\b`)
 
-// parseRuleCount returns the rule count from the ACL header, or -1 when the
-// output does not contain one. The distinction matters: an unreadable snapshot
-// must not be mistaken for an empty ACL.
-func parseRuleCount(raw string) int {
-	m := ruleCountRe.FindStringSubmatch(raw)
-	if m == nil { return -1 }
-	n, err := strconv.Atoi(m[1])
-	if err != nil { return -1 }
-	return n
-}
+// countClauseRe matches the same clause together with the comma that follows it,
+// so removing it leaves a header that reads the same as one printed without it.
+var countClauseRe = regexp.MustCompile(`(?m)\d+[ \t]+rules?\b,?`)
 
 func ruleExistsInSnapshot(raw string, ruleID int) bool {
 	prefix := fmt.Sprintf("rule %d ", ruleID)
@@ -816,12 +818,11 @@ func diffOps(a, b []string) []diffOp {
 // approved change landed on the device. It deliberately does not consult the
 // agent's own report: the point is to check the device, not to check whether
 // the agent agrees with itself.
-func verifyChange(preRaw, postRaw string, ruleID int) error {
-	preCount := parseRuleCount(preRaw)
-	postCount := parseRuleCount(postRaw)
-	if preCount < 0 || postCount < 0 {
-		return fmt.Errorf("cannot parse rule count (pre=%d post=%d)", preCount, postCount)
-	}
+func verifyChange(preRaw, postRaw string, aclNum, ruleID int) error {
+	preCount, err := aclout.Count(preRaw, aclNum)
+	if err != nil { return fmt.Errorf("pre-change snapshot: %w", err) }
+	postCount, err := aclout.Count(postRaw, aclNum)
+	if err != nil { return fmt.Errorf("post-change snapshot: %w", err) }
 	// A: the rule count went up by exactly one.
 	if postCount != preCount+1 {
 		return fmt.Errorf("assertion A failed: pre count %d, post count %d", preCount, postCount)
@@ -865,9 +866,19 @@ func significantLines(raw string, ruleID int) []string {
 		l = strings.TrimSpace(l)
 		if l == "" { continue }
 		if id, ok := ruleIDOfLine(l); ok && id == ruleID { continue }
-		out = append(out, ruleCountRe.ReplaceAllString(l, "N rules,"))
+		out = append(out, neutralizeRuleCount(l))
 	}
 	return out
+}
+
+// neutralizeRuleCount removes the "N rules," clause so that a header carrying a
+// count compares equal to one that carries none. Rewriting the number to a
+// placeholder is not enough: a device that prints no clause at all for an empty
+// ACL would then differ from its own output one rule later, and assertion B
+// would call a correct dispatch a change to an unrelated line.
+func neutralizeRuleCount(line string) string {
+	if !countClauseRe.MatchString(line) { return line }
+	return strings.Join(strings.Fields(countClauseRe.ReplaceAllString(line, "")), " ")
 }
 
 func fingerprintRaw(raw string) string {
@@ -1004,10 +1015,8 @@ func (s *Service) DispatchStream(ctx context.Context, actor *auth.User, crID int
 			"submit the request again to review a current diff")
 	}
 
-	expectCount := parseRuleCount(preRaw)
-	if expectCount < 0 {
-		return fmt.Errorf("cannot parse rule count from pre-dispatch snapshot")
-	}
+	expectCount, err := aclout.Count(preRaw, s.cfg.ACL)
+	if err != nil { return err }
 	if err := updatePlanExpectCount(s.cfg.PlanDir, code, expectCount); err != nil {
 		return fmt.Errorf("update plan expect_count: %w", err)
 	}
@@ -1066,7 +1075,7 @@ func (s *Service) DispatchStream(ctx context.Context, actor *auth.User, crID int
 	if runErr != nil || agentResp.Result != plan.ResultOK {
 		return s.handleDispatchFailure(ctx, actor, crID, code, ruleID, preRaw)
 	}
-	if err := verifyChange(preRaw, postRaw, ruleID); err != nil {
+	if err := verifyChange(preRaw, postRaw, s.cfg.ACL, ruleID); err != nil {
 		s.auditDirect(actor, "change_request", crID, "verify_failed",
 			map[string]interface{}{"error": err.Error()})
 		return s.handleDispatchFailure(ctx, actor, crID, code, ruleID, preRaw)
