@@ -18,7 +18,7 @@ import (
 	"github.com/githubflyideas/acl-edit-only/internal/h3c/plan"
 )
 
-const agentVersion = "0.4.0"
+const agentVersion = "0.4.1"
 
 func main() {
 	if err := run(); err != nil {
@@ -44,6 +44,7 @@ func run() error {
 	requestID  := fs.String("request", "", "change request ID")
 	planSHA256 := fs.String("plan-sha256", "", "expected SHA-256 of plan file")
 	streamMode := fs.Bool("stream", false, "write terminal output to stderr line by line")
+	quoteWire  := fs.Bool("quote-wire", false, "write every chunk the device sends to stderr, Go-quoted, for diagnosing line endings")
 	if err := fs.Parse(os.Args[2:]); err != nil { return err }
 
 	cfg, err := LoadConfig(*configPath)
@@ -67,6 +68,8 @@ func run() error {
 	defer zeroBytes(password)
 
 	ctx := context.Background()
+	if *quoteWire { wireOut = os.Stderr }
+
 	switch subcmd {
 	case "snapshot":
 		var sw io.Writer
@@ -168,6 +171,11 @@ func doRollback(ctx context.Context, cfg *AgentConfig, password []byte, stream i
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
+// wireOut is set by -quote-wire and, when set, receives a Go-quoted copy of
+// everything the device sends. It is package state because it is a diagnostic
+// switch, not part of any operation's contract.
+var wireOut io.Writer
+
 func openSession(ctx context.Context, cfg *AgentConfig, password []byte, stream io.Writer) (*device.Session, error) {
 	tr := &device.TelnetTransport{}
 	dialCfg := device.DialConfig{
@@ -182,6 +190,7 @@ func openSession(ctx context.Context, cfg *AgentConfig, password []byte, stream 
 	auth := &device.Auth{Username: username, Password: password}
 	s := device.NewSession(tr, dialCfg, auth, cfg.ACL, time.Duration(cfg.ReadTimeout)*time.Second)
 	if stream != nil { s.SetStream(stream) }
+	if wireOut != nil { s.SetWire(wireOut) }
 	return s, s.Open(ctx)
 }
 

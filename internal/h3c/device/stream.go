@@ -15,3 +15,10 @@ type StreamWriter interface {
 func (s *Session) SetStream(w io.Writer) {
 	s.stream = w
 }
+
+// SetWire asks for a Go-quoted copy of every chunk the device sends, before any
+// normalising, so that line endings and control bytes can be read off a bug
+// report instead of guessed at.
+func (s *Session) SetWire(w io.Writer) {
+	s.wire = w
+}
