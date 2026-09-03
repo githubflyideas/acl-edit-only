@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/githubflyideas/acl-edit-only/internal/cfgpath"
 	"github.com/githubflyideas/acl-edit-only/internal/h3c/device"
 	"github.com/githubflyideas/acl-edit-only/internal/h3c/plan"
 )
@@ -38,7 +39,8 @@ func run() error {
 	}
 
 	fs := flag.NewFlagSet(subcmd, flag.ContinueOnError)
-	configPath := fs.String("config", "/etc/aclsys/agent.json", "agent config file")
+	configPath := fs.String("config", cfgpath.Sibling("aclagent.json"),
+		"agent config file; defaults to the one next to this binary")
 	requestID  := fs.String("request", "", "change request ID")
 	planSHA256 := fs.String("plan-sha256", "", "expected SHA-256 of plan file")
 	streamMode := fs.Bool("stream", false, "write terminal output to stderr line by line")
@@ -50,13 +52,7 @@ func run() error {
 		return err
 	}
 
-	uid := selfUID()
-	if err := checkFilePerms(cfg.ConfigPath(), 0400, uid); err != nil {
-		writeFailResponse(cfg, plan.ResultPlanRejected, plan.StageConnect,
-			"config perm check: "+err.Error())
-		return err
-	}
-	if err := checkFilePerms(cfg.CredentialFile, 0400, uid); err != nil {
+	if err := checkSecretFile(cfg.CredentialFile); err != nil {
 		writeFailResponse(cfg, plan.ResultPlanRejected, plan.StageConnect,
 			"credential perm check: "+err.Error())
 		return err

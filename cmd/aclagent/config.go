@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/githubflyideas/acl-edit-only/internal/cfgpath"
 )
 
 const defaultDailyLimit = 50
@@ -41,8 +43,23 @@ func LoadConfig(path string) (*AgentConfig, error) {
 	h := sha256.Sum256(raw)
 	cfg.configSHA256 = fmt.Sprintf("%x", h)
 	cfg.configPath = absPath
+	cfg.applyDefaults(filepath.Dir(absPath))
 	if err := cfg.validate(); err != nil { return nil, fmt.Errorf("invalid config: %w", err) }
 	return &cfg, nil
+}
+
+// applyDefaults fills in every path the operator did not name, and resolves the
+// ones they did against the directory holding this config. Unpacking the release
+// into one directory and setting acl, the rule range and device_addr is then the
+// whole of the configuration.
+func (c *AgentConfig) applyDefaults(dir string) {
+	if c.CredentialFile == "" { c.CredentialFile = "credential" }
+	if c.PlanDir == "" { c.PlanDir = "plans" }
+	if c.StateFile == "" { c.StateFile = "agent-state.json" }
+	if c.AllocMax == 0 { c.AllocMax = c.RangeMax }
+	c.CredentialFile = cfgpath.Resolve(dir, c.CredentialFile)
+	c.PlanDir = cfgpath.Resolve(dir, c.PlanDir)
+	c.StateFile = cfgpath.Resolve(dir, c.StateFile)
 }
 
 func (c *AgentConfig) validate() error {
@@ -58,10 +75,7 @@ func (c *AgentConfig) validate() error {
 	if c.AllocMax < c.RangeMin || c.AllocMax > c.RangeMax {
 		return fmt.Errorf("alloc_max %d outside [%d,%d]", c.AllocMax, c.RangeMin, c.RangeMax)
 	}
-	if c.CredentialFile == "" { return fmt.Errorf("credential_file is required") }
-	if c.DeviceAddr == ""    { return fmt.Errorf("device_addr is required") }
-	if c.PlanDir == ""       { return fmt.Errorf("plan_dir is required") }
-	if c.StateFile == ""     { return fmt.Errorf("state_file is required") }
+	if c.DeviceAddr == "" { return fmt.Errorf("device_addr is required") }
 	if c.ConnectTimeout <= 0 { c.ConnectTimeout = 10 }
 	if c.ReadTimeout <= 0    { c.ReadTimeout = 30 }
 	if c.DailyLimit <= 0     { c.DailyLimit = defaultDailyLimit }

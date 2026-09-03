@@ -1,6 +1,6 @@
 // Command aclweb runs the HTTP server for the H3C ACL approval system.
-// It has no device credentials; all device access is delegated to acl-agent
-// called via sudo.
+// It has no device credentials; all device access is delegated to acl-agent,
+// which it runs as a short-lived subprocess.
 package main
 
 import (
@@ -15,10 +15,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/githubflyideas/acl-edit-only/internal/aclweb/auth"
+	"github.com/githubflyideas/acl-edit-only/internal/cfgpath"
 	"github.com/githubflyideas/acl-edit-only/internal/aclweb/core"
 	"github.com/githubflyideas/acl-edit-only/internal/aclweb/db"
 	"github.com/githubflyideas/acl-edit-only/internal/aclweb/handler"
@@ -55,7 +57,9 @@ type Config struct {
 }
 
 func loadConfig(path string) (*Config, error) {
-	raw, err := os.ReadFile(path)
+	absPath, err := filepath.Abs(path)
+	if err != nil { return nil, err }
+	raw, err := os.ReadFile(absPath)
 	if err != nil { return nil, err }
 	cfg := &Config{
 		Listen:           ":8443",
@@ -63,16 +67,41 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if err := json.Unmarshal(raw, cfg); err != nil { return nil, err }
 	if cfg.ACL == 0 { return nil, fmt.Errorf("acl must be non-zero in config") }
+	if cfg.RangeMin == 0 || cfg.RangeMax == 0 {
+		return nil, fmt.Errorf("range_min and range_max are required")
+	}
 	if cfg.AllocMax == 0 { cfg.AllocMax = cfg.RangeMax }
+
+	// Everything else defaults to a name inside the directory holding this
+	// config, and any relative path the operator does give is read the same way.
+	// One unpacked directory, one config, nothing to install anywhere.
+	dir := filepath.Dir(absPath)
 	if cfg.DBPath == "" { cfg.DBPath = "aclweb.db" }
-	if cfg.AgentBin == "" { return nil, fmt.Errorf("agent_bin is required") }
-	if cfg.AgentCfg == "" { return nil, fmt.Errorf("agent_cfg is required") }
-	if cfg.PlanDir == "" { return nil, fmt.Errorf("plan_dir is required") }
+	if cfg.PlanDir == "" { cfg.PlanDir = "plans" }
+	if cfg.AgentCfg == "" { cfg.AgentCfg = "aclagent.json" }
+	if cfg.AgentBin == "" { cfg.AgentBin = cfgpath.Sibling("aclagent") }
+	cfg.DBPath = cfgpath.Resolve(dir, cfg.DBPath)
+	cfg.PlanDir = cfgpath.Resolve(dir, cfg.PlanDir)
+	cfg.AgentCfg = cfgpath.Resolve(dir, cfg.AgentCfg)
+	cfg.AgentBin = cfgpath.Resolve(dir, cfg.AgentBin)
+	cfg.TLSCert = cfgpath.Resolve(dir, cfg.TLSCert)
+	cfg.TLSKey = cfgpath.Resolve(dir, cfg.TLSKey)
+
+	if _, err := os.Stat(cfg.AgentBin); err != nil {
+		return nil, fmt.Errorf("agent binary %s: %w", cfg.AgentBin, err)
+	}
+	if _, err := os.Stat(cfg.AgentCfg); err != nil {
+		return nil, fmt.Errorf("agent config %s: %w", cfg.AgentCfg, err)
+	}
+	if err := os.MkdirAll(cfg.PlanDir, 0o750); err != nil {
+		return nil, fmt.Errorf("plan dir %s: %w", cfg.PlanDir, err)
+	}
 	return cfg, nil
 }
 
 func main() {
-	cfgPath := flag.String("config", "aclweb.json", "path to web config JSON")
+	cfgPath := flag.String("config", cfgpath.Sibling("aclweb.json"),
+		"path to web config JSON; defaults to the one next to this binary")
 	flag.Parse()
 
 	cfg, err := loadConfig(*cfgPath)
