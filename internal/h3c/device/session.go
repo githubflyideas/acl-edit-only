@@ -62,19 +62,33 @@ func (s *Session) Open(ctx context.Context) error {
 	if err := s.tr.Connect(ctx, s.cfg); err != nil {
 		return &SessionError{Stage: "connect", Cause: err}
 	}
-	if _, _, err := s.readUntil(ctx, []string{promptUsername, promptUserView, promptSysView}); err != nil {
+	// A switch configured with a password and no local user account goes straight
+	// to "Password:" and never asks who is connecting. Which of the two prompts
+	// arrives decides what to send, rather than assuming a username is always
+	// wanted: sending one to a device that did not ask for it consumes the
+	// password prompt and the login fails for a reason that looks nothing like
+	// the cause.
+	_, idx, err := s.readUntil(ctx, []string{promptUsername, promptPassword, promptUserView, promptSysView})
+	if err != nil {
 		return &SessionError{Stage: "auth", Cause: fmt.Errorf("no login prompt: %w", err)}
 	}
-	if err := s.send(ctx, s.auth.Username+"\r\n"); err != nil {
-		return &SessionError{Stage: "auth", Cause: err}
-	}
-	if _, _, err := s.readUntil(ctx, []string{promptPassword}); err != nil {
-		return &SessionError{Stage: "auth", Cause: fmt.Errorf("no password prompt: %w", err)}
+	if idx == 0 {
+		if s.auth.Username == "" {
+			return &SessionError{Stage: "auth", Cause: fmt.Errorf(
+				"the device asked for a username but the credential file holds only a password; " +
+					"put the username on the first line and the base64 of the password on the second")}
+		}
+		if err := s.send(ctx, s.auth.Username+"\r\n"); err != nil {
+			return &SessionError{Stage: "auth", Cause: err}
+		}
+		if _, _, err := s.readUntil(ctx, []string{promptPassword}); err != nil {
+			return &SessionError{Stage: "auth", Cause: fmt.Errorf("no password prompt: %w", err)}
+		}
 	}
 	if err := s.tr.Send(ctx, append(s.auth.Password, '\r', '\n')); err != nil {
 		return &SessionError{Stage: "auth", Cause: err}
 	}
-	_, idx, err := s.readUntil(ctx, []string{promptUserView, promptPassword})
+	_, idx, err = s.readUntil(ctx, []string{promptUserView, promptPassword})
 	if err != nil {
 		return &SessionError{Stage: "auth", Cause: fmt.Errorf("login failed: %w", err)}
 	}

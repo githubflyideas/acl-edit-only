@@ -28,9 +28,16 @@ func (d *Device) serve(c net.Conn) {
 	s.out("* Copyright (c) 2004-2024 New H3C Technologies Co., Ltd.         *\r\n")
 	s.out("******************************************************************\r\n\r\n")
 
-	s.out("\r\nUsername:")
-	user, err := s.readLine(true)
-	if err != nil { return }
+	// A device with no local user account never prints "Username:". Modelling that
+	// is the point: it is a supported switch configuration and the client has to
+	// cope with either prompt arriving first.
+	var user string
+	if d.Username != "" {
+		s.out("\r\nUsername:")
+		u, err := s.readLine(true)
+		if err != nil { return }
+		user = u
+	}
 	s.out("\r\nPassword:")
 	pass, err := s.readLine(false)
 	if err != nil { return }
