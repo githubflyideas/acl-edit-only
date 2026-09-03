@@ -115,10 +115,14 @@ func (s *Service) Submit(ctx context.Context, actor *auth.User, req SubmitReques
 	}
 	req.normalize()
 
-	// Take snapshot (S1).
+	// Take snapshot (S1). How long it took is part of the error: a read that sat
+	// waiting for a prompt it never recognised and a switch that refused the
+	// connection immediately look identical otherwise, and they call for
+	// completely different things to be checked.
+	started := time.Now()
 	snapshotRaw, err := s.runSnapshot(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("snapshot failed: %w", err)
+		return 0, fmt.Errorf("snapshot failed after %s: %w", time.Since(started).Round(time.Second), err)
 	}
 	snapshotID, err := s.saveSnapshot(snapshotRaw, "pre_request")
 	if err != nil {
