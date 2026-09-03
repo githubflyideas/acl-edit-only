@@ -57,6 +57,12 @@ type Device struct {
 	// some H3C models and restricted privilege levels do.
 	NoScreenLength bool
 
+	// LoginPromptText is the word the device uses to ask who is connecting.
+	// Comware prints "Username:" on some versions and "login:" on others, and
+	// which one you get also depends on how the vty is authenticated, so both
+	// have to be reachable from a test. Empty means "Username:".
+	LoginPromptText string
+
 	ln net.Listener
 }
 
@@ -128,4 +134,10 @@ func (d *Device) Commands() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return append([]string(nil), d.CmdLog...)
+}
+
+// loginPrompt is the text the device asks for a username with.
+func (d *Device) loginPrompt() string {
+	if d.LoginPromptText != "" { return d.LoginPromptText }
+	return "Username:"
 }

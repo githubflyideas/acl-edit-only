@@ -10,7 +10,6 @@ import (
 )
 
 const (
-	promptUsername = "Username:"
 	promptPassword = "Password:"
 	promptUserView = ">"
 	promptSysView  = "]"
@@ -26,6 +25,14 @@ var rePrompt = regexp.MustCompile(`(?:^|\n)(?:<[^<>\n]{1,64}>|\[[^\[\]\n]{1,64}\
 // reMore matches the paging marker. Devices pad it differently, so the spacing
 // is deliberately loose.
 var reMore = regexp.MustCompile(`----\s*More\s*----`)
+
+// reUsernamePrompt and rePasswordPrompt match the two login questions. Comware
+// asks who is connecting with "Username:" on some versions and "login:" on
+// others, and the word also depends on how the vty is authenticated, so neither
+// spelling can be assumed. Both are anchored at the end of the output because a
+// prompt is the last thing the device sends before it waits.
+var reUsernamePrompt = regexp.MustCompile(`(?i)(?:username|login)\s*:[ \t\r\x00]*\z`)
+var rePasswordPrompt = regexp.MustCompile(`(?i)password\s*:[ \t\r\x00]*\z`)
 
 var reSuccess = regexp.MustCompile(`(?i)success`)
 var reSaveCFM = regexp.MustCompile(`\[Y/N\]|\(Y/N\)|Y/N`)
@@ -73,7 +80,7 @@ func (s *Session) Open(ctx context.Context) error {
 	// wanted: sending one to a device that did not ask for it consumes the
 	// password prompt and the login fails for a reason that looks nothing like
 	// the cause.
-	_, idx, err := s.readUntil(ctx, []string{promptUsername, promptPassword, promptUserView, promptSysView})
+	_, idx, err := s.readUntilRe(ctx, []*regexp.Regexp{reUsernamePrompt, rePasswordPrompt, rePrompt})
 	if err != nil {
 		return &SessionError{Stage: "auth", Cause: fmt.Errorf("no login prompt: %w", err)}
 	}
@@ -86,14 +93,14 @@ func (s *Session) Open(ctx context.Context) error {
 		if err := s.send(ctx, s.auth.Username+"\r\n"); err != nil {
 			return &SessionError{Stage: "auth", Cause: err}
 		}
-		if _, _, err := s.readUntil(ctx, []string{promptPassword}); err != nil {
+		if _, _, err := s.readUntilRe(ctx, []*regexp.Regexp{rePasswordPrompt}); err != nil {
 			return &SessionError{Stage: "auth", Cause: fmt.Errorf("no password prompt: %w", err)}
 		}
 	}
 	if err := s.tr.Send(ctx, append(s.auth.Password, '\r', '\n')); err != nil {
 		return &SessionError{Stage: "auth", Cause: err}
 	}
-	_, idx, err = s.readUntil(ctx, []string{promptUserView, promptPassword})
+	_, idx, err = s.readUntilRe(ctx, []*regexp.Regexp{rePrompt, rePasswordPrompt})
 	if err != nil {
 		return &SessionError{Stage: "auth", Cause: fmt.Errorf("login failed: %w", err)}
 	}

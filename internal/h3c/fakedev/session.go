@@ -33,7 +33,7 @@ func (d *Device) serve(c net.Conn) {
 	// cope with either prompt arriving first.
 	var user string
 	if d.Username != "" {
-		s.out("\r\nUsername:")
+		s.out("\r\n" + d.loginPrompt())
 		u, err := s.readLine(true)
 		if err != nil { return }
 		user = u
