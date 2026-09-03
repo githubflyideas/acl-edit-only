@@ -1,6 +1,7 @@
 package handler_test
 
 import (
+	"html"
 	"bufio"
 	"database/sql"
 	"fmt"
@@ -276,6 +277,17 @@ func fullFlow(t *testing.T, ruleComment bool) {
 	}
 	if !strings.Contains(detail, "确认执行") {
 		t.Error("detail page shows no execute button for a pending request")
+	}
+	// The comparison is two columns, and the new rule belongs in the right-hand
+	// one. Finding the rule text somewhere on the page is not enough: it appears
+	// in the raw diff block as well.
+	if !strings.Contains(detail, `<table class="sbs">`) {
+		t.Error("detail page does not render the side-by-side comparison")
+	}
+	if i := strings.Index(detail, html.EscapeString(wantLine)+"</td>"); i < 0 {
+		t.Errorf("the new rule is not in a table cell at all\n%s", snippet([]byte(detail)))
+	} else if cell := detail[max(0, i-30):i]; !strings.Contains(cell, `<td class="r">`) {
+		t.Errorf("the new rule is not in the after column, cell opens with %q", cell)
 	}
 
 	// Step 3: execute, watching the terminal stream.

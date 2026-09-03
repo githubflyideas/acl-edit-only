@@ -337,10 +337,14 @@ func (h *Handler) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
 	if approveComment.Valid { d.ApproveComment = approveComment.String }
 	if ruleID.Valid { d.RuleID = ruleID.Int64 }
 
+	rows := core.SideBySideDiff(d.DiffText)
+	added, removed := core.DiffCounts(rows)
+
 	actor := r.Context().Value(ctxUser).(*auth.User)
 	h.render(w, r, "request_detail.html", map[string]interface{}{
 		"D": d, "Actor": actor, "CSRF": h.csrfToken(r),
 		"CanExecute": d.State == "pending" || d.State == "approved",
+		"DiffRows":   rows, "DiffAdded": added, "DiffRemoved": removed,
 	})
 }
 

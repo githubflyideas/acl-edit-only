@@ -734,16 +734,22 @@ func unifiedDiff(a, b string) string {
 			if j >= 0 && j < len(ops) { keep[j] = true }
 		}
 	}
-	skipping := false
+	// An elided run is written as "@@ N unchanged lines @@". Plain "@@" would
+	// leave the side-by-side view unable to number the lines below a skip, and a
+	// count is worth reading on its own: it says how much of the ACL the diff is
+	// not showing.
+	skipFrom := -1
+	flushSkip := func(upto int) {
+		if skipFrom < 0 { return }
+		fmt.Fprintf(&out, "@@ %d unchanged lines @@\n", upto-skipFrom)
+		skipFrom = -1
+	}
 	for i, op := range ops {
 		if !keep[i] {
-			if !skipping {
-				out.WriteString("@@\n")
-				skipping = true
-			}
+			if skipFrom < 0 { skipFrom = i }
 			continue
 		}
-		skipping = false
+		flushSkip(i)
 		switch op.kind {
 		case opEqual:
 			fmt.Fprintf(&out, " %s\n", op.text)
@@ -753,6 +759,7 @@ func unifiedDiff(a, b string) string {
 			fmt.Fprintf(&out, "+%s\n", op.text)
 		}
 	}
+	flushSkip(len(ops))
 	return out.String()
 }
 

@@ -27,10 +27,36 @@
     </table>
   </div>
 
-  {{if .D.DiffText}}
+  {{if .DiffRows}}
   <div class="card">
-    <h3 style="margin-top:0">变更 Diff</h3>
-    <pre id="diff-block">{{.D.DiffText}}</pre>
+    <h3 style="margin-top:0">变更对比</h3>
+    <p class="diff-legend">
+      左边是设备现在的配置，右边是执行后的配置。
+      <span class="n-add">+{{.DiffAdded}} 行</span> /
+      <span class="n-del">-{{.DiffRemoved}} 行</span>
+    </p>
+    <table class="sbs">
+      <colgroup><col class="no"><col class="mark"><col><col class="no"><col class="mark"><col></colgroup>
+      <tr><th colspan="3">现在（{{.D.Code}} 之前）</th><th colspan="3">执行后</th></tr>
+      {{range .DiffRows}}
+      {{if eq .Kind "skip"}}
+      <tr class="skip"><td colspan="6">{{.Left}}</td></tr>
+      {{else}}
+      <tr class="{{.Kind}}">
+        <td class="no">{{if .LeftNo}}{{.LeftNo}}{{end}}</td>
+        <td class="mark l">{{if or (eq .Kind "remove") (eq .Kind "replace")}}-{{end}}</td>
+        <td class="l">{{.Left}}</td>
+        <td class="no side">{{if .RightNo}}{{.RightNo}}{{end}}</td>
+        <td class="mark r">{{if or (eq .Kind "add") (eq .Kind "replace")}}+{{end}}</td>
+        <td class="r">{{.Right}}</td>
+      </tr>
+      {{end}}
+      {{end}}
+    </table>
+    <details style="margin-top:12px">
+      <summary style="cursor:pointer;font-size:.82rem;color:#555">原始 diff 文本（审批留档的就是这一段）</summary>
+      <pre id="diff-block" style="margin-top:8px">{{.D.DiffText}}</pre>
+    </details>
   </div>
   {{end}}
 

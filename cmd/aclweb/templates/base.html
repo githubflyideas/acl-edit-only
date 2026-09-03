@@ -36,6 +36,24 @@
     pre{background:#f5f5f5;padding:12px;border-radius:4px;overflow-x:auto;font-size:.82rem;white-space:pre-wrap}
     pre .add{color:#2e7d32}
     pre .del{color:#c62828}
+    /* The side-by-side diff. Colour is not the only signal: every changed row
+       also carries a marker in its gutter, for printing and for anyone who does
+       not separate red from green. */
+    table.sbs{table-layout:fixed;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.8rem;border:1px solid #ddd}
+    table.sbs col.no{width:44px}
+    table.sbs col.mark{width:18px}
+    table.sbs th{background:#fafafa;text-align:left;padding:6px 8px;font-family:system-ui,sans-serif;font-size:.82rem;border-bottom:1px solid #ddd}
+    table.sbs td{padding:2px 6px;vertical-align:top;white-space:pre-wrap;word-break:break-all;border-bottom:1px solid #f0f0f0}
+    table.sbs td.no{text-align:right;color:#999;background:#fafafa;user-select:none;font-size:.72rem}
+    table.sbs td.mark{text-align:center;color:#666;user-select:none;font-weight:700}
+    table.sbs td.side{border-left:1px solid #eee}
+    table.sbs tr.add td.r,table.sbs tr.replace td.r{background:#e6ffed}
+    table.sbs tr.remove td.l,table.sbs tr.replace td.l{background:#ffeef0}
+    table.sbs tr.add td.l,table.sbs tr.remove td.r{background:#fbfbfb}
+    table.sbs tr.skip td{background:#f5f7ff;color:#5c6bc0;text-align:center;font-size:.74rem;padding:4px}
+    .diff-legend{font-size:.82rem;color:#555;margin:0 0 10px}
+    .diff-legend .n-add{color:#2e7d32;font-weight:600}
+    .diff-legend .n-del{color:#c62828;font-weight:600}
   </style>
 </head>
 <body>
