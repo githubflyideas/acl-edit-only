@@ -155,11 +155,21 @@ func main() {
 	h.Register(mux)
 
 	srv := &http.Server{
-		Addr:         cfg.Listen,
-		Handler:      mux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:              cfg.Listen,
+		Handler:           mux,
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+
+		// No WriteTimeout. Go measures it from the moment the request headers were
+		// read, not from the first write, so it is a limit on how long a handler
+		// may take rather than on how slowly a client may read. Submitting a
+		// request takes a telnet round trip to the switch, and the dispatch
+		// endpoint streams a whole session for as long as it lasts; a 30s limit
+		// there meant the response — including the error explaining what went
+		// wrong — could not be written at all, and the operator saw a page that
+		// never loaded. The work is bounded where it belongs, by the agent
+		// timeout and the agent's own connect and read timeouts.
 		TLSConfig:    &tls.Config{MinVersion: tls.VersionTLS12},
 	}
 
