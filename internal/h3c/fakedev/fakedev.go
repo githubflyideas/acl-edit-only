@@ -66,9 +66,13 @@ func New(hostname string, aclNum int, user, pass string, rules []Rule) *Device {
 	return d
 }
 
-// Start listens on 127.0.0.1 and returns the address.
-func (d *Device) Start() (string, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+// Start listens on an arbitrary port on 127.0.0.1 and returns the address.
+func (d *Device) Start() (string, error) { return d.ListenOn("127.0.0.1:0") }
+
+// ListenOn is Start with the address chosen by the caller, for running the fake
+// device as a standalone process.
+func (d *Device) ListenOn(addr string) (string, error) {
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return "", err
 	}
