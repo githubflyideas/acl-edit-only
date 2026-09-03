@@ -80,9 +80,9 @@ func (s *Session) Open(ctx context.Context) error {
 	// wanted: sending one to a device that did not ask for it consumes the
 	// password prompt and the login fails for a reason that looks nothing like
 	// the cause.
-	_, idx, err := s.readUntilRe(ctx, []*regexp.Regexp{reUsernamePrompt, rePasswordPrompt, rePrompt})
+	out, idx, err := s.readUntilRe(ctx, []*regexp.Regexp{reUsernamePrompt, rePasswordPrompt, rePrompt})
 	if err != nil {
-		return &SessionError{Stage: "auth", Cause: fmt.Errorf("no login prompt: %w", err)}
+		return &SessionError{Stage: "auth", Cause: fmt.Errorf("no login prompt: %w; the device sent %s", err, quoteTail(out))}
 	}
 	if idx == 0 {
 		if s.auth.Username == "" {
@@ -93,8 +93,9 @@ func (s *Session) Open(ctx context.Context) error {
 		if err := s.send(ctx, s.auth.Username+"\r\n"); err != nil {
 			return &SessionError{Stage: "auth", Cause: err}
 		}
-		if _, _, err := s.readUntilRe(ctx, []*regexp.Regexp{rePasswordPrompt}); err != nil {
-			return &SessionError{Stage: "auth", Cause: fmt.Errorf("no password prompt: %w", err)}
+		out, _, err := s.readUntilRe(ctx, []*regexp.Regexp{rePasswordPrompt})
+		if err != nil {
+			return &SessionError{Stage: "auth", Cause: fmt.Errorf("no password prompt: %w; the device sent %s", err, quoteTail(out))}
 		}
 	}
 	if err := s.tr.Send(ctx, append(s.auth.Password, '\r', '\n')); err != nil {
@@ -321,6 +322,17 @@ func offendingLine(out, pattern string) string {
 		}
 	}
 	return strings.TrimSpace(out)
+}
+
+// quoteTail renders the last of what the device sent, Go-quoted so that the
+// control bytes that decide these questions are visible. Only the reads that
+// happen before the password goes out may use it: the auth phase is kept out of
+// the transcript and the stream for the same reason, and an error string ends up
+// in both.
+func quoteTail(out string) string {
+	if out == "" { return "nothing at all" }
+	if len(out) > 200 { out = "..." + out[len(out)-200:] }
+	return fmt.Sprintf("%q instead", out)
 }
 
 type SessionError struct{ Stage string; Cause error }
