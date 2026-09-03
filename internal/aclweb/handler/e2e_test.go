@@ -295,6 +295,11 @@ func fullFlow(t *testing.T, ruleComment bool) {
 	if strings.Contains(term, e2ePass) {
 		t.Error("device password appeared in the browser stream")
 	}
+	// The fake device ends lines the way a real one does, CR NUL LF. The NUL is
+	// telnet punctuation and must not reach the terminal a person watches.
+	if strings.Contains(term, "\x00") {
+		t.Errorf("NUL bytes reached the browser stream\n--- terminal ---\n%q", term)
+	}
 
 	// Step 4: the device really changed.
 	var got *fakedev.Rule
@@ -554,5 +559,58 @@ func TestDriftBetweenSubmitAndExecuteStopsTheChange(t *testing.T) {
 		if r.Body == "permit ip destination 10.99.2.8 0" {
 			t.Error("the rule was written to the switch despite the drift")
 		}
+	}
+}
+
+// TestFullFlowIntoAnEmptyACL is the first thing a new deployment does: point the
+// tool at an ACL that has just been created and holds nothing. The rule count
+// used to be read strictly enough that an empty ACL looked like an unreadable
+// snapshot, and no rule could be allocated at all.
+func TestFullFlowIntoAnEmptyACL(t *testing.T) {
+	t.Run("header counts zero", func(t *testing.T) { emptyACLFlow(t, false) })
+	t.Run("header omits the count", func(t *testing.T) { emptyACLFlow(t, true) })
+}
+
+// emptyACLFlow runs the empty-ACL path against both shapes of header a device may
+// print for an ACL with nothing in it, since which one a given switch prints is
+// not something this project can settle from documentation.
+func emptyACLFlow(t *testing.T, omitCount bool) {
+	h := newHarness(t, nil)
+	h.dev.OmitEmptyCount = omitCount
+	h.login(t)
+	tok := h.csrf(t)
+
+	resp, err := h.cli.PostForm(h.srv.URL+"/requests/new", url.Values{
+		"csrf_token":   {tok},
+		"protocol":     {"tcp"},
+		"dst_ip":       {"10.99.1.7"},
+		"dst_wildcard": {"0.0.0.0"},
+		"dst_port_op":  {"eq"},
+		"dst_port_val": {"8443"},
+		"reason":       {"the very first rule in a brand new ACL"},
+	})
+	if err != nil { t.Fatal(err) }
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("submit into an empty ACL: status %d, want 303\n%s", resp.StatusCode, snippet(body))
+	}
+
+	crID := strings.TrimPrefix(resp.Header.Get("Location"), "/requests/")
+	term, done, sseErr := h.stream(t, crID, tok)
+	if sseErr != "" {
+		t.Fatalf("dispatch reported an error: %s\n--- terminal ---\n%s", sseErr, term)
+	}
+	if !done {
+		t.Fatalf("dispatch never completed\n--- terminal ---\n%s", term)
+	}
+
+	rules := h.dev.Rules()
+	if len(rules) != 1 {
+		t.Fatalf("device holds %d rules, want 1: %v", len(rules), rules)
+	}
+	if rules[0].ID != e2eRangeMin {
+		t.Errorf("first rule allocated at %d, want %d — an empty ACL starts at the "+
+			"bottom of the window", rules[0].ID, e2eRangeMin)
 	}
 }

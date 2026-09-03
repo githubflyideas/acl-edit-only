@@ -37,6 +37,17 @@ type Device struct {
 	rules    map[int]*Rule
 	Saved    bool
 	SaveFail bool // when true, "save" reports failure
+
+	// OmitEmptyCount drops the "N rules," clause from the header when the ACL
+	// holds nothing. Which form a given switch prints is not something this
+	// project can settle from documentation, and the client has to read both, so
+	// both are available to test against.
+	OmitEmptyCount bool
+
+	// PlainLineEndings makes the device end lines with CR LF instead of the CR
+	// NUL LF a real switch sends. Only tests that want to read the transcript
+	// byte for byte should set it.
+	PlainLineEndings bool
 	CmdLog   []string
 
 	// PageLines is how many body lines fit on one screen before "---- More ----".

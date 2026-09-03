@@ -218,8 +218,12 @@ func (s *conn) displayACL(n int) {
 	}
 	rules := d.Rules()
 	var lines []string
-	lines = append(lines, fmt.Sprintf("Advanced IPv4 ACL %d, named -, %d rule%s,",
-		d.ACL, len(rules), plural(len(rules))))
+	if len(rules) == 0 && d.OmitEmptyCount {
+		lines = append(lines, fmt.Sprintf("Advanced IPv4 ACL %d, named -,", d.ACL))
+	} else {
+		lines = append(lines, fmt.Sprintf("Advanced IPv4 ACL %d, named -, %d rule%s,",
+			d.ACL, len(rules), plural(len(rules))))
+	}
 	lines = append(lines, "ACL's step is 5")
 	for _, r := range rules {
 		lines = append(lines, fmt.Sprintf(" rule %d %s", r.ID, r.Body))
@@ -285,7 +289,13 @@ func (s *conn) errIncomplete() {
 
 // ─── wire I/O ────────────────────────────────────────────────────
 
-func (s *conn) out(text string) { s.raw(escape([]byte(text))) }
+// out writes device text. A real H3C switch ends every line CR NUL LF — telnet's
+// spelling of a carriage return that is not itself a line ending — so that is
+// what this writes unless the test asked for plain CR LF.
+func (s *conn) out(text string) {
+	if !s.d.PlainLineEndings { text = strings.ReplaceAll(text, "\r\n", "\r\x00\n") }
+	s.raw(escape([]byte(text)))
+}
 
 func (s *conn) raw(b []byte) { s.c.Write(b) } //nolint:errcheck
 
