@@ -25,17 +25,22 @@
         <input name="dst_ip" placeholder="10.0.0.1" required>
       </div>
       <div class="form-row">
-        <label>目的 wildcard（/32 留空则填 0.0.0.0）</label>
-        <input name="dst_wildcard" value="0.0.0.0" placeholder="0.0.0.0">
+        <label>目的地址范围</label>
+        <select name="dst_wildcard" id="dst_wildcard_sel" onchange="wildcardChanged()">
+          <option value="0.0.0.0">单台主机（只放行上面这一个 IP）</option>
+          <option value="0.0.0.255">整个 /24 网段（后 8 位任意）</option>
+          <option value="0.0.255.255">整个 /16 网段（后 16 位任意）</option>
+          <option value="custom">其他（手工填 wildcard）</option>
+        </select>
+        <input name="dst_wildcard_custom" id="dst_wildcard_custom" placeholder="例如 0.0.0.15"
+               style="display:none;margin-top:6px">
       </div>
       <div class="form-row">
         <label>目的端口（可选）</label>
         <div style="display:flex;gap:8px">
-          <select name="dst_port_op" style="width:120px">
-            <option value="">— 不限 —</option>
-            <option value="eq">eq</option>
-            <option value="gt">gt</option>
-            <option value="lt">lt</option>
+          <select name="dst_port_op" style="width:150px">
+            <option value="">— 不限端口 —</option>
+            <option value="eq">等于（eq）</option>
           </select>
           <input name="dst_port_val" type="number" min="1" max="65535" placeholder="端口号">
         </div>
@@ -53,4 +58,18 @@
     </form>
   </div>
 </div>
+<script>
+// The three named choices cover every request this tool has been asked for, but
+// a wildcard is a wildcard and the switch accepts any of them, so the field
+// stays reachable rather than being designed out.
+function wildcardChanged() {
+  const sel = document.getElementById('dst_wildcard_sel');
+  const box = document.getElementById('dst_wildcard_custom');
+  const custom = sel.value === 'custom';
+  box.style.display = custom ? '' : 'none';
+  box.name = custom ? 'dst_wildcard' : 'dst_wildcard_custom';
+  sel.name = custom ? 'dst_wildcard_sel' : 'dst_wildcard';
+  if (custom) box.focus();
+}
+</script>
 {{end}}
