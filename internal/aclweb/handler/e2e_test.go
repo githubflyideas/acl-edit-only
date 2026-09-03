@@ -278,6 +278,11 @@ func fullFlow(t *testing.T, ruleComment bool) {
 	if !strings.Contains(detail, "确认执行") {
 		t.Error("detail page shows no execute button for a pending request")
 	}
+	// Nothing may take the terminal away on a timer. The operator decides when
+	// the record has been read.
+	if strings.Contains(detail, "location.reload(); }, ") {
+		t.Error("the page still reloads itself after dispatch")
+	}
 	// The comparison is two columns, and the new rule belongs in the right-hand
 	// one. Finding the rule text somewhere on the page is not enough: it appears
 	// in the raw diff block as well.

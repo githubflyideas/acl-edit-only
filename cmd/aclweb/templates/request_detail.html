@@ -74,6 +74,14 @@
     <h3 style="margin-top:0;font-family:monospace">终端输出</h3>
     <pre id="terminal" style="background:#1e1e1e;color:#d4d4d4;min-height:200px;max-height:480px;overflow-y:auto;font-size:.82rem;padding:14px"></pre>
     <div id="term-status" style="margin-top:10px;font-weight:600"></div>
+    <!-- The page does not reload itself. What the switch said is the only record
+         of what happened that a person can read, and it used to be replaced by a
+         fresh page two seconds later, before anyone had finished reading it. -->
+    <div id="term-done" style="display:none;margin-top:12px">
+      <button class="btn btn-primary" onclick="location.reload()">看完了，刷新页面</button>
+      <button class="btn btn-outline" style="margin-left:8px" onclick="copyTerminal()">复制终端输出</button>
+      <span id="copy-note" style="margin-left:8px;font-size:.82rem;color:#2e7d32"></span>
+    </div>
   </div>
 
   <div class="card" id="reject-card" style="display:none">
@@ -111,21 +119,31 @@
     es.addEventListener('done', function(e) {
       es.close();
       status.style.color = '#2e7d32';
-      status.textContent = '✓ 执行成功，页面将自动刷新…';
-      setTimeout(function(){ location.reload(); }, 2000);
+      status.textContent = '✓ 执行成功。终端输出留在页面上，看完了再刷新。';
+      document.getElementById('term-done').style.display = '';
     });
     es.addEventListener('error', function(e) {
       es.close();
       status.style.color = '#c62828';
       status.textContent = '✗ 执行失败：' + (e.data || '未知错误');
+      document.getElementById('term-done').style.display = '';
     });
     es.onerror = function() {
       es.close();
       if (!status.textContent) {
         status.style.color = '#c62828';
         status.textContent = '✗ 连接中断';
+        document.getElementById('term-done').style.display = '';
       }
     };
+  }
+
+  function copyTerminal() {
+    const text = document.getElementById('terminal').textContent;
+    const note = document.getElementById('copy-note');
+    navigator.clipboard.writeText(text).then(
+      function(){ note.textContent = '已复制'; },
+      function(){ note.style.color = '#c62828'; note.textContent = '复制失败，手动选中即可'; });
   }
 
   function showReject() {
