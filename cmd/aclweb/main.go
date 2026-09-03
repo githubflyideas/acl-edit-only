@@ -102,6 +102,8 @@ func loadConfig(path string) (*Config, error) {
 func main() {
 	cfgPath := flag.String("config", cfgpath.Sibling("aclweb.json"),
 		"path to web config JSON; defaults to the one next to this binary")
+	resetUser := flag.String("reset-password", "",
+		"print a new random password for this user, then exit")
 	flag.Parse()
 
 	cfg, err := loadConfig(*cfgPath)
@@ -114,6 +116,18 @@ func main() {
 
 	// Auth service.
 	as := auth.NewService(sqlDB)
+
+	// The initial password is printed once and never again, so there has to be a
+	// way back in that does not mean deleting the database. Anyone who can run
+	// this already owns the file, so nothing is being given away here.
+	if *resetUser != "" {
+		pw, err := as.ResetPassword(*resetUser)
+		if err != nil { log.Fatalf("reset password: %v", err) }
+		log.Printf("PASSWORD RESET — username: %s  password: %s", *resetUser, pw)
+		log.Printf("Change this password immediately after logging in.")
+		return
+	}
+
 	initialPw, err := as.CreateInitialAdmin("admin")
 	if err != nil { log.Fatalf("initial admin: %v", err) }
 	if initialPw != "" {

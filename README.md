@@ -107,9 +107,20 @@ WantedBy=multi-user.target
 INITIAL ADMIN CREATED — username: admin  password: Xk9mP2...
 ```
 
+这一行走的是 **stderr**，而且只在数据库里还没有用户时打印一次。用 `./aclweb >aclweb.log` 只重定向 stdout 是看不到它的：
+
 ```bash
+./aclweb >aclweb.log 2>&1            # 或者
 journalctl -u aclweb | grep "INITIAL ADMIN"
 ```
+
+密码丢了不用删库，让它重新发一个：
+
+```bash
+./aclweb -reset-password admin
+```
+
+这条命令重置密码、吊销该用户所有会话、打印新密码后退出。它不校验旧密码——能运行它的人已经能读数据库文件了。
 
 访问配置里 `listen` 的地址（没填 `tls_cert` 时是明文 HTTP），登录后立即改密。
 

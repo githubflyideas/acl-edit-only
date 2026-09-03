@@ -172,6 +172,33 @@ func (s *Service) ChangePassword(userID int64, oldPassword, newPassword string) 
 	return tx.Commit()
 }
 
+// ResetPassword sets a fresh random password for a user and returns it, revoking
+// every session they hold. There is no current-password check and no session to
+// authenticate: this is reachable only by whoever can already open the database
+// file, which is to say whoever runs the service, and it exists because the
+// initial password is printed exactly once. Losing that line used to mean losing
+// the only way in.
+func (s *Service) ResetPassword(username string) (string, error) {
+	var id int64
+	if err := s.db.QueryRow(`SELECT id FROM users WHERE username=?`, username).Scan(&id); err != nil {
+		return "", fmt.Errorf("no such user: %s", username)
+	}
+	password := randomPassword(24)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
+	if err != nil { return "", err }
+	tx, err := s.db.Begin()
+	if err != nil { return "", err }
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE users SET password_hash=?, active=1 WHERE id=?`, string(hash), id); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(`DELETE FROM sessions WHERE user_id=?`, id); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil { return "", err }
+	return password, nil
+}
+
 // SetActive activates or deactivates a user (and revokes sessions on deactivation).
 // Refuses to deactivate the last active admin.
 func (s *Service) SetActive(actorID, targetID int64, active bool) error {
