@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -516,9 +517,21 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, name string, da
 		http.Error(w, "rendering error", http.StatusInternalServerError)
 		return
 	}
-	if err := t.ExecuteTemplate(w, name, data); err != nil {
+	// The page is built in memory before any of it is sent. Executing straight
+	// into the ResponseWriter commits a 200 and however many bytes got out before
+	// the failure, so the error page could not be sent afterwards — the attempt
+	// logged "superfluous WriteHeader" and the operator was left with a truncated
+	// page. Nothing reaches the client here until the whole page exists.
+	var buf bytes.Buffer
+	if err := t.ExecuteTemplate(&buf, name, data); err != nil {
 		log.Printf("template %s error: %v", name, err)
 		http.Error(w, "rendering error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		log.Printf("template %s: writing the response failed: %v", name, err)
 	}
 }
 
