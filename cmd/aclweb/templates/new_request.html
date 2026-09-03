@@ -27,7 +27,7 @@
       <div class="form-row">
         <label>目的地址范围</label>
         <select name="dst_wildcard" id="dst_wildcard_sel" onchange="wildcardChanged()">
-          <option value="0.0.0.0">单台主机（只放行上面这一个 IP）</option>
+          <option value="0.0.0.0" selected>单台主机（只放行上面这一个 IP）</option>
           <option value="0.0.0.255">整个 /24 网段（后 8 位任意）</option>
           <option value="0.0.255.255">整个 /16 网段（后 16 位任意）</option>
           <option value="custom">其他（手工填 wildcard）</option>
