@@ -175,28 +175,39 @@ func openSession(ctx context.Context, cfg *AgentConfig, password []byte, stream 
 		ConnectTimeout: time.Duration(cfg.ConnectTimeout) * time.Second,
 		ReadTimeout:    time.Duration(cfg.ReadTimeout) * time.Second,
 	}
+	// An empty username is passed through as empty on purpose. It used to default
+	// to "admin", which turned a password-only credential file into a login
+	// attempt as a user that may not exist on the device.
 	username, _ := loadUsername(cfg.CredentialFile)
-	if username == "" { username = "admin" }
 	auth := &device.Auth{Username: username, Password: password}
 	s := device.NewSession(tr, dialCfg, auth, cfg.ACL, time.Duration(cfg.ReadTimeout)*time.Second)
 	if stream != nil { s.SetStream(stream) }
 	return s, s.Open(ctx)
 }
 
-// credLines splits a credential file into its two required lines: the username
-// and the base64 of the password. A file with only one line used to be accepted,
-// with that line read as the password and the username left empty, which then
-// surfaced as an authentication failure from the switch and pointed nowhere near
-// the actual mistake.
+// credLines splits a credential file into a username and the base64 of a
+// password. Two lines mean both; a single line is the password alone, which is
+// what a switch authenticating on a password with no local user account wants.
+//
+// The one-line form used to be read as a username-less login regardless of what
+// the device asked for, so a file that was simply missing its first line failed
+// as a rejected login and pointed nowhere near the mistake. It is now a declared
+// mode, and the session reports it by name if the device does ask for a username.
 func credLines(credFile string) (string, string, error) {
 	raw, err := os.ReadFile(credFile)
 	if err != nil { return "", "", err }
-	lines := strings.SplitN(strings.TrimSpace(string(raw)), "\n", 2)
-	if len(lines) < 2 {
-		return "", "", fmt.Errorf("credential file %s must hold two lines: "+
-			"the username, then the base64 of the password", credFile)
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	for i := range lines { lines[i] = strings.TrimSpace(lines[i]) }
+	switch len(lines) {
+	case 1:
+		if lines[0] == "" {
+			return "", "", fmt.Errorf("credential file %s is empty: it needs the base64 of the "+
+				"password, optionally preceded by a line holding the username", credFile)
+		}
+		return "", lines[0], nil
+	default:
+		return lines[0], lines[1], nil
 	}
-	return strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1]), nil
 }
 
 func loadPassword(credFile string) ([]byte, error) {
@@ -204,7 +215,10 @@ func loadPassword(credFile string) ([]byte, error) {
 	if err != nil { return nil, err }
 	pw, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
-		return nil, fmt.Errorf("credential file %s: second line is not valid base64: %w", credFile, err)
+		return nil, fmt.Errorf("credential file %s: the password line is not valid base64: %w", credFile, err)
+	}
+	if len(pw) == 0 {
+		return nil, fmt.Errorf("credential file %s: the password is empty", credFile)
 	}
 	return pw, nil
 }

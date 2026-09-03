@@ -41,13 +41,24 @@ acl-edit-only/
 }
 ```
 
-`credential` —— 第一行用户名，第二行口令的 base64。只有这个文件有权限要求：不能被别人读，且属主是跑 aclagent 的那个用户。
+`credential` —— 交换机上配了本地用户的，第一行用户名，第二行口令的 base64：
 
 ```bash
 printf 'admin\n' > credential
 printf 'yourpassword' | base64 >> credential
 chmod 600 credential
 ```
+
+交换机上**没有用户名、只认口令**的（登录后直接问 `Password:`），就只写一行 base64：
+
+```bash
+printf 'yourpassword' | base64 > credential
+chmod 600 credential
+```
+
+agent 不猜：一行就是不发送任何用户名。如果设备其实要用户名而文件里只有一行，报的是"设备要用户名而 credential 只有口令"，不是一句登录被拒。
+
+只有这个文件有权限要求：不能被别人读，且属主是跑 aclagent 的那个用户。
 
 启动：
 
@@ -79,7 +90,9 @@ chmod 600 credential
 ./aclweb
 ```
 
-对应的 `aclagent.json` 改两行：`"device_addr": "127.0.0.1:2300"`，`credential` 写 `aclbot` 和 `aclbot-pw` 的 base64。
+对应的 `aclagent.json` 改一行：`"device_addr": "127.0.0.1:2300"`，`credential` 写 `aclbot` 和 `aclbot-pw` 的 base64。
+
+`fakesw -user ""` 是只认口令、不问用户名的模式，用来对着单行 credential 试。
 
 ### systemd（想做成服务的话）
 

@@ -23,15 +23,26 @@ func TestLoadPasswordWellFormed(t *testing.T) {
 	if u != "admin" { t.Errorf("username = %q, want admin", u) }
 }
 
-// TestLoadPasswordRejectsSingleLine covers a misconfiguration that used to pass
-// silently: a credential file holding only the base64 password. The username
-// came back empty and the operator saw an authentication failure from the
-// switch with nothing pointing at the file.
-func TestLoadPasswordRejectsSingleLine(t *testing.T) {
-	_, err := loadPassword(writeCred(t, "czNjcmV0\n"))
-	if err == nil { t.Fatal("expected an error for a credential file with no username line") }
-	if !strings.Contains(err.Error(), "two lines") {
-		t.Errorf("error = %q, want it to say what the file should look like", err)
+// TestSingleLineIsAPasswordOnlyCredential covers a switch that authenticates on
+// a password with no local user account. The file holds the base64 password and
+// nothing else, and the username must come back empty rather than defaulting to
+// something, so that the session sends no username at all.
+func TestSingleLineIsAPasswordOnlyCredential(t *testing.T) {
+	pw, err := loadPassword(writeCred(t, "czNjcmV0\n"))
+	if err != nil { t.Fatalf("loadPassword: %v", err) }
+	if string(pw) != "s3cret" { t.Errorf("password = %q, want s3cret", pw) }
+	u, err := loadUsername(writeCred(t, "czNjcmV0\n"))
+	if err != nil { t.Fatalf("loadUsername: %v", err) }
+	if u != "" { t.Errorf("username = %q, want empty for a password-only file", u) }
+}
+
+// TestEmptyCredentialFileIsNamed keeps the one genuinely broken case from being
+// read as a password-only login with an empty password.
+func TestEmptyCredentialFileIsNamed(t *testing.T) {
+	_, err := loadPassword(writeCred(t, "\n \n"))
+	if err == nil { t.Fatal("expected an error for an empty credential file") }
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error = %q, want it to say the file is empty", err)
 	}
 }
 
