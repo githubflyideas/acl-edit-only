@@ -142,6 +142,13 @@ const maxPages = 4000
 // therefore not part of the text. This is what erases the "---- More ----"
 // marker along with the spaces the device paints over it.
 func normalizeTerminal(raw string) string {
+	// NUL bytes come first. Telnet spells a carriage return that is not a line
+	// ending as CR NUL, and H3C switches end every line that way: "text\r\x00\n".
+	// Left in place the NUL sits after the CR, so the CR looks like an overwrite
+	// and the replay below throws the whole line away — which is exactly what a
+	// real device produced: a snapshot of nothing but NULs and a prompt, and a
+	// rule count that could not be read.
+	raw = strings.ReplaceAll(raw, "\x00", "")
 	lines := strings.Split(raw, "\n")
 	for i, l := range lines {
 		// The CR that terminates the line is punctuation, not an overwrite.
@@ -258,6 +265,10 @@ func (s *Session) record(out string) {
 	if s.inAuth {
 		return
 	}
+	// The NUL half of telnet's CR NUL is punctuation, not text. It has no place
+	// in a transcript a person reads or in the JSON a snapshot returns, where it
+	// showed up as a line of "\u0000" and made a healthy session look broken.
+	out = strings.ReplaceAll(out, "\x00", "")
 	s.rawBuf.WriteString(out)
 	if s.stream != nil {
 		s.stream.Write([]byte(out)) //nolint:errcheck
