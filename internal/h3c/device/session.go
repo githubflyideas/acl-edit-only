@@ -44,6 +44,11 @@ func aclViewPromptRe(aclNum int) *regexp.Regexp {
 
 type Session struct {
 	stream io.Writer
+	// wire, when set, receives every chunk read from the device exactly as it
+	// arrived, Go-quoted. Line endings and control bytes are invisible in a
+	// transcript, and guessing at them from a hand-copied paste is how two
+	// releases went out without fixing the right thing.
+	wire io.Writer
 	tr      Transport
 	cfg     DialConfig
 	auth    *Auth
@@ -143,22 +148,29 @@ const maxPages = 4000
 // marker along with the spaces the device paints over it.
 func normalizeTerminal(raw string) string {
 	// NUL bytes come first. Telnet spells a carriage return that is not a line
-	// ending as CR NUL, and H3C switches end every line that way: "text\r\x00\n".
-	// Left in place the NUL sits after the CR, so the CR looks like an overwrite
-	// and the replay below throws the whole line away — which is exactly what a
-	// real device produced: a snapshot of nothing but NULs and a prompt, and a
-	// rule count that could not be read.
+	// ending as CR NUL, and the switch this was deployed against ends lines that
+	// way. They carry no text and only get in the way of the replay below.
 	raw = strings.ReplaceAll(raw, "\x00", "")
 	lines := strings.Split(raw, "\n")
 	for i, l := range lines {
-		// The CR that terminates the line is punctuation, not an overwrite.
-		l = strings.TrimSuffix(l, "\r")
-		if idx := strings.LastIndex(l, "\r"); idx >= 0 {
-			l = l[idx+1:]
-		}
-		lines[i] = moreLineRe.ReplaceAllString(l, "")
+		lines[i] = moreLineRe.ReplaceAllString(replayCR(l), "")
 	}
 	return strings.Join(lines, "\n")
+}
+
+// replayCR resolves the carriage returns inside one line the way a terminal
+// would: the cursor goes back to the start of the line and whatever follows is
+// painted over what was there. Only a segment that actually paints something
+// counts. A device that ends its lines with one or more bare carriage returns —
+// CR LF, CR CR LF, CR NUL LF — writes nothing after the last one, and the text
+// already on the line stands. Treating those as overwrites is what erased every
+// line of a real switch's output and left a snapshot of blank lines.
+func replayCR(line string) string {
+	segs := strings.Split(line, "\r")
+	for i := len(segs) - 1; i >= 0; i-- {
+		if strings.TrimSpace(segs[i]) != "" { return segs[i] }
+	}
+	return ""
 }
 
 func (s *Session) EnterSystemView(ctx context.Context) error {
@@ -265,6 +277,7 @@ func (s *Session) record(out string) {
 	if s.inAuth {
 		return
 	}
+	if s.wire != nil { fmt.Fprintf(s.wire, "%q\n", out) } //nolint:errcheck
 	// The NUL half of telnet's CR NUL is punctuation, not text. It has no place
 	// in a transcript a person reads or in the JSON a snapshot returns, where it
 	// showed up as a line of "\u0000" and made a healthy session look broken.
