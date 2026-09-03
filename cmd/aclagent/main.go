@@ -64,7 +64,8 @@ func run() error {
 
 	password, err := loadPassword(cfg.CredentialFile)
 	if err != nil {
-		writeFailResponse(cfg, plan.ResultAuthFailed, plan.StageAuth, "credential load failed")
+		writeFailResponse(cfg, plan.ResultAuthFailed, plan.StageAuth,
+			"credential load failed: "+sanitise(err.Error()))
 		return err
 	}
 	defer zeroBytes(password)
@@ -186,20 +187,35 @@ func openSession(ctx context.Context, cfg *AgentConfig, password []byte, stream 
 	return s, s.Open(ctx)
 }
 
-func loadPassword(credFile string) ([]byte, error) {
+// credLines splits a credential file into its two required lines: the username
+// and the base64 of the password. A file with only one line used to be accepted,
+// with that line read as the password and the username left empty, which then
+// surfaced as an authentication failure from the switch and pointed nowhere near
+// the actual mistake.
+func credLines(credFile string) (string, string, error) {
 	raw, err := os.ReadFile(credFile)
-	if err != nil { return nil, err }
+	if err != nil { return "", "", err }
 	lines := strings.SplitN(strings.TrimSpace(string(raw)), "\n", 2)
-	b64 := strings.TrimSpace(lines[len(lines)-1])
-	return base64.StdEncoding.DecodeString(b64)
+	if len(lines) < 2 {
+		return "", "", fmt.Errorf("credential file %s must hold two lines: "+
+			"the username, then the base64 of the password", credFile)
+	}
+	return strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1]), nil
+}
+
+func loadPassword(credFile string) ([]byte, error) {
+	_, b64, err := credLines(credFile)
+	if err != nil { return nil, err }
+	pw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, fmt.Errorf("credential file %s: second line is not valid base64: %w", credFile, err)
+	}
+	return pw, nil
 }
 
 func loadUsername(credFile string) (string, error) {
-	raw, err := os.ReadFile(credFile)
-	if err != nil { return "", err }
-	lines := strings.SplitN(strings.TrimSpace(string(raw)), "\n", 2)
-	if len(lines) >= 2 { return strings.TrimSpace(lines[0]), nil }
-	return "", nil
+	user, _, err := credLines(credFile)
+	return user, err
 }
 
 func loadPlanFile(cfg *AgentConfig, reqID string) (*plan.Plan, error) {

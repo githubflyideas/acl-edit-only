@@ -445,7 +445,9 @@ func (s *Service) Reconcile(ctx context.Context) error {
 func (s *Service) runSnapshot(ctx context.Context) (string, error) {
 	resp, err := s.runAgent(ctx, "snapshot")
 	if err != nil { return "", err }
-	if resp.Result != plan.ResultOK { return "", fmt.Errorf("snapshot failed: %s %s", resp.Result, resp.Detail) }
+	if resp.Result != plan.ResultOK {
+		return "", fmt.Errorf("agent reported %s", describeResponse(resp, ""))
+	}
 	return resp.Raw, nil
 }
 
@@ -465,14 +467,27 @@ func (s *Service) runAgentStream(ctx context.Context, w io.Writer, subcmd string
 	}
 	args = append(args, extraArgs...)
 	cmd := exec.CommandContext(tctx, args[0], args[1:]...)
+
+	// The agent's stderr is kept in every case, streaming or not. It is where
+	// the agent says why it gave up — a file whose mode or owner failed the
+	// check, an unparsable config, a refused telnet connection — and discarding
+	// it left the operator with nothing but "agent exited with error".
+	tail := &tailWriter{max: 4096}
 	if w != nil {
-		cmd.Stderr = w
+		cmd.Stderr = io.MultiWriter(w, tail)
+	} else {
+		cmd.Stderr = tail
 	}
 	out, err := cmd.Output()
 	if err != nil {
+		stderrText := strings.TrimSpace(tail.String())
 		if len(out) > 0 {
-			resp, jerr := plan.UnmarshalResponse(out)
-			if jerr == nil { return resp, fmt.Errorf("agent exited with error") }
+			if resp, jerr := plan.UnmarshalResponse(out); jerr == nil {
+				return resp, fmt.Errorf("agent reported %s", describeResponse(resp, stderrText))
+			}
+		}
+		if stderrText != "" {
+			return plan.Response{Result: plan.ResultInconsistent}, fmt.Errorf("%v: %s", err, stderrText)
 		}
 		return plan.Response{Result: plan.ResultInconsistent}, err
 	}
@@ -483,6 +498,42 @@ func (s *Service) runAgentStream(ctx context.Context, w io.Writer, subcmd string
 	}
 	return resp, nil
 }
+
+// describeResponse turns an agent response into the one line an operator needs:
+// what it decided, where it got to, and why. The agent's own detail is
+// preferred; its stderr is the fallback for the cases where it exits before
+// filling the field in.
+func describeResponse(r plan.Response, stderrText string) string {
+	var sb strings.Builder
+	sb.WriteString(string(r.Result))
+	if r.Stage != "" {
+		sb.WriteString(" at stage ")
+		sb.WriteString(string(r.Stage))
+	}
+	detail := strings.TrimSpace(r.Detail)
+	if detail == "" { detail = stderrText }
+	if detail == "" { detail = "no detail reported" }
+	sb.WriteString(": ")
+	sb.WriteString(detail)
+	return sb.String()
+}
+
+// tailWriter keeps the last max bytes written to it. The tail is the useful end
+// of a process's stderr: whatever killed it was the last thing it said.
+type tailWriter struct {
+	max int
+	buf []byte
+}
+
+func (t *tailWriter) Write(p []byte) (int, error) {
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > t.max {
+		t.buf = t.buf[len(t.buf)-t.max:]
+	}
+	return len(p), nil
+}
+
+func (t *tailWriter) String() string { return string(t.buf) }
 
 func (s *Service) saveSnapshot(raw, trigger string) (int64, error) {
 	fp := fingerprintRaw(raw)
