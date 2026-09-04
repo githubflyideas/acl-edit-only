@@ -20,7 +20,12 @@ const (
 // rePrompt matches a device prompt that sits at the very end of the output.
 // Requiring end-of-text is what makes reads safe against rule comments that
 // happen to contain ">" or "]": those appear mid-line, never as the tail.
-var rePrompt = regexp.MustCompile(`(?:^|\n)(?:<[^<>\n]{1,64}>|\[[^\[\]\n]{1,64}\])[ \t\r\x00]*\z`)
+//
+// What may precede the prompt is any of the bytes a device uses to get back to
+// the start of a line, not a newline alone. This switch punctuates lines with
+// CR NUL and redraws the prompt after a bare carriage return, so insisting on
+// "\n" made a perfectly normal prompt invisible and the login timed out.
+var rePrompt = regexp.MustCompile(`(?:^|[\n\r\x00])(?:<[^<>\n]{1,64}>|\[[^\[\]\n]{1,64}\])[ \t\r\x00]*\z`)
 
 // reMore matches the paging marker. Devices pad it differently, so the spacing
 // is deliberately loose.
@@ -124,9 +129,14 @@ func (s *Session) Open(ctx context.Context) error {
 	if err := s.tr.Send(ctx, append(s.auth.Password, '\r', '\n')); err != nil {
 		return &SessionError{Stage: "auth", Cause: err}
 	}
-	_, idx, err = s.readUntilRe(ctx, []*regexp.Regexp{rePrompt, rePasswordPrompt})
+	out, idx, err = s.readUntilRe(ctx, []*regexp.Regexp{rePrompt, rePasswordPrompt})
 	if err != nil {
-		return &SessionError{Stage: "auth", Cause: fmt.Errorf("login failed: %w", err)}
+		// The tail goes into the message with the password taken out of it. Without
+		// it this timeout says only that something was expected and did not arrive,
+		// which is the least useful thing an error about a prompt can say, and the
+		// prompt is precisely what differs between switches.
+		return &SessionError{Stage: "auth", Cause: fmt.Errorf("login failed: %w; the device sent %s",
+			err, quoteTail(scrubPassword(out, s.auth.Password)))}
 	}
 	if idx == 1 {
 		return &SessionError{Stage: "auth", Cause: fmt.Errorf("authentication rejected")}
@@ -329,6 +339,11 @@ func (s *Session) readUntilRe(ctx context.Context, res []*regexp.Regexp) (string
 // auth phase is excluded so the password never reaches either.
 func (s *Session) record(out string) {
 	if s.inAuth {
+		// The transcript and the live stream stay out of the auth phase, but the
+		// wire dump does not: every byte-level failure so far has been in the login
+		// exchange, and a diagnostic that cannot see the part that breaks is not a
+		// diagnostic. The password is removed rather than the whole chunk withheld.
+		if s.wire != nil { fmt.Fprintf(s.wire, "%q\n", scrubPassword(out, s.auth.Password)) } //nolint:errcheck
 		return
 	}
 	if s.wire != nil { fmt.Fprintf(s.wire, "%q\n", out) } //nolint:errcheck
@@ -376,6 +391,16 @@ func offendingLine(out, pattern string) string {
 // transcript and the browser stream, which the auth phase is deliberately kept
 // out of. The two login reads it is used on both happen before the password
 // goes out; the rest are device configuration output.
+// scrubPassword removes the password from text that is about to be shown. It is
+// what makes it safe to quote the device during authentication: the only way a
+// password can appear in device output is an echo, and an echo is exactly the
+// kind of thing worth seeing with the secret taken out of it.
+func scrubPassword(out string, password []byte) string {
+	pw := strings.TrimRight(string(password), "\r\n")
+	if len(pw) < 3 { return out }
+	return strings.ReplaceAll(out, pw, "<password>")
+}
+
 func quoteTail(out string) string {
 	if out == "" { return "nothing at all" }
 	if len(out) > 200 { out = "..." + out[len(out)-200:] }
