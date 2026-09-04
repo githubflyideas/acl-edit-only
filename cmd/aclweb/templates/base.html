@@ -39,11 +39,23 @@
     /* The side-by-side diff. Colour is not the only signal: every changed row
        also carries a marker in its gutter, for printing and for anyone who does
        not separate red from green. */
-    table.sbs{table-layout:fixed;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.8rem;border:1px solid #ddd}
+    /* The diff is the one thing on the page that is read line by line, so it is
+       allowed out of the 960px column and up to the width of the window. It is
+       centred on the page rather than on its container, which is the same point
+       because the container is centred too. */
+    .widen{width:min(1800px,calc(100vw - 32px));margin-left:50%;transform:translateX(-50%)}
+    /* One scrollbar for both sides. A wrapped line breaks the one-line-per-rule
+       reading that makes a diff worth showing, and wrapping only the right-hand
+       side pushes the two columns out of step, so lines are never wrapped and a
+       line too long for the window is reached by scrolling the whole table —
+       which keeps the two sides aligned while it moves. */
+    .sbswrap{overflow-x:auto}
+    table.sbs{width:100%;min-width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.8rem;border:1px solid #ddd}
     table.sbs col.no{width:44px}
     table.sbs col.mark{width:18px}
+    table.sbs col.side{width:50%}
     table.sbs th{background:#fafafa;text-align:left;padding:6px 8px;font-family:system-ui,sans-serif;font-size:.82rem;border-bottom:1px solid #ddd}
-    table.sbs td{padding:2px 6px;vertical-align:top;white-space:pre-wrap;word-break:break-all;border-bottom:1px solid #f0f0f0}
+    table.sbs td{padding:2px 6px;vertical-align:top;white-space:pre;word-break:normal;border-bottom:1px solid #f0f0f0}
     table.sbs td.no{text-align:right;color:#999;background:#fafafa;user-select:none;font-size:.72rem}
     table.sbs td.mark{text-align:center;color:#666;user-select:none;font-weight:700}
     table.sbs td.side{border-left:1px solid #eee}

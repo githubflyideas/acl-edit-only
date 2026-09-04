@@ -28,15 +28,16 @@
   </div>
 
   {{if .DiffRows}}
-  <div class="card">
+  <div class="card widen">
     <h3 style="margin-top:0">变更对比</h3>
     <p class="diff-legend">
       左边是设备现在的配置，右边是执行后的配置。
       <span class="n-add">+{{.DiffAdded}} 行</span> /
       <span class="n-del">-{{.DiffRemoved}} 行</span>
     </p>
+    <div class="sbswrap">
     <table class="sbs">
-      <colgroup><col class="no"><col class="mark"><col><col class="no"><col class="mark"><col></colgroup>
+      <colgroup><col class="no"><col class="mark"><col class="side"><col class="no"><col class="mark"><col class="side"></colgroup>
       <tr><th colspan="3">现在（{{.D.Code}} 之前）</th><th colspan="3">执行后</th></tr>
       {{range .DiffRows}}
       {{if eq .Kind "skip"}}
@@ -53,6 +54,7 @@
       {{end}}
       {{end}}
     </table>
+    </div>
     <details style="margin-top:12px">
       <summary style="cursor:pointer;font-size:.82rem;color:#555">原始 diff 文本（审批留档的就是这一段）</summary>
       <pre id="diff-block" style="margin-top:8px">{{.D.DiffText}}</pre>
