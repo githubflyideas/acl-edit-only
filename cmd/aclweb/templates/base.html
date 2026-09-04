@@ -43,17 +43,20 @@
        allowed out of the 960px column and up to the width of the window. It is
        centred on the page rather than on its container, which is the same point
        because the container is centred too. */
-    .widen{width:min(1800px,calc(100vw - 32px));margin-left:50%;transform:translateX(-50%)}
+    /* Wide enough for the longest line and no wider. Fixing the width at the
+       window's instead left half the card empty whenever the rules were short,
+       which is most of the time. The floor is the ordinary column width so the
+       card never looks narrower than the ones above it. */
+    .widen{width:fit-content;min-width:100%;max-width:min(1800px,calc(100vw - 32px));margin-left:50%;transform:translateX(-50%)}
     /* One scrollbar for both sides. A wrapped line breaks the one-line-per-rule
        reading that makes a diff worth showing, and wrapping only the right-hand
        side pushes the two columns out of step, so lines are never wrapped and a
        line too long for the window is reached by scrolling the whole table —
        which keeps the two sides aligned while it moves. */
     .sbswrap{overflow-x:auto}
-    table.sbs{width:100%;min-width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.8rem;border:1px solid #ddd}
+    table.sbs{width:max-content;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.8rem;border:1px solid #ddd}
     table.sbs col.no{width:44px}
     table.sbs col.mark{width:18px}
-    table.sbs col.side{width:50%}
     table.sbs th{background:#fafafa;text-align:left;padding:6px 8px;font-family:system-ui,sans-serif;font-size:.82rem;border-bottom:1px solid #ddd}
     table.sbs td{padding:2px 6px;vertical-align:top;white-space:pre;word-break:normal;border-bottom:1px solid #f0f0f0}
     table.sbs td.no{text-align:right;color:#999;background:#fafafa;user-select:none;font-size:.72rem}

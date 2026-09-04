@@ -140,12 +140,38 @@
     };
   }
 
+  // navigator.clipboard exists only in a secure context, and this tool is
+  // deployed over plain HTTP on a management address, so on the machine that
+  // matters it is undefined and reaching into it threw before either callback
+  // could run — the button did nothing at all, silently. The older selection
+  // copy works on plain HTTP and is what actually runs here; the modern API is
+  // tried first for the day the deployment gets TLS.
   function copyTerminal() {
     const text = document.getElementById('terminal').textContent;
     const note = document.getElementById('copy-note');
-    navigator.clipboard.writeText(text).then(
-      function(){ note.textContent = '已复制'; },
-      function(){ note.style.color = '#c62828'; note.textContent = '复制失败，手动选中即可'; });
+    function ok()   { note.style.color = '#2e7d32'; note.textContent = '已复制'; }
+    function fail() { note.style.color = '#c62828'; note.textContent = '复制失败，手动选中终端输出再按 Ctrl+C'; }
+    if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(ok, function(){ if (selectionCopy(text)) { ok(); } else { fail(); } });
+      return;
+    }
+    if (selectionCopy(text)) { ok(); } else { fail(); }
+  }
+
+  function selectionCopy(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    ta.style.top = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    let done = false;
+    try { done = document.execCommand('copy'); } catch (e) { done = false; }
+    document.body.removeChild(ta);
+    return done;
   }
 
   function showReject() {
