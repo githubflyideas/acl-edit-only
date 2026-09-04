@@ -303,10 +303,16 @@ func (h *Handler) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
 	// plain strings fails, and the failure used to be reported as 404, hiding
 	// the one page that would explain what happened.
 	var diffText, planJSON, planSHA sql.NullString
+	// A delete request describes a rule ID, not a rule, so it writes none of the
+	// match columns and they come back NULL. Scanning NULL into a string is an
+	// error, and the whole page became "database error" — for rows already in the
+	// database, which is why the defaulting belongs here in the read and not only
+	// in the insert.
 	err = h.db.QueryRowContext(r.Context(), `
 		SELECT cr.id, cr.request_code, cr.action, cr.state, cr.reason,
-		       cr.protocol, cr.src_ip, cr.dst_ip,
-		       cr.src_port_op, cr.src_port_val, cr.dst_port_op, cr.dst_port_val,
+		       COALESCE(cr.protocol,''), COALESCE(cr.src_ip,''), cr.dst_ip,
+		       COALESCE(cr.src_port_op,''), COALESCE(cr.src_port_val,0),
+		       COALESCE(cr.dst_port_op,''), COALESCE(cr.dst_port_val,0),
 		       req.username, COALESCE(app.username,''), cr.approve_comment, cr.rule_id, cr.submitted_at,
 		       ca.diff_text, ca.plan_json, ca.plan_sha256
 		FROM change_requests cr

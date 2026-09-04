@@ -15,13 +15,17 @@
 
   <div class="card">
     <table>
-      <tr><th style="width:160px">操作类型</th><td>{{.D.Action}}</td></tr>
+      <tr><th style="width:160px">操作类型</th><td>{{if eq .D.Action "delete_rule"}}删除规则（delete_rule）{{else}}新增规则（add_rule）{{end}}</td></tr>
       <tr><th>申请人</th><td>{{.D.Requester}}</td></tr>
       <tr><th>Rule ID</th><td>{{if .D.RuleID}}{{.D.RuleID}}{{else}}（待分配）{{end}}</td></tr>
+      {{/* A delete request names a rule ID and nothing else; it never wrote the
+           match columns, so printing them here only produced a row of N/A. */}}
+      {{if ne .D.Action "delete_rule"}}
       <tr><th>协议</th><td>{{.D.Protocol}}</td></tr>
       <tr><th>源 IP</th><td>{{if .D.SrcIP}}{{.D.SrcIP}}{{else}}any{{end}}</td></tr>
       <tr><th>目的 IP</th><td>{{.D.DstIP}}</td></tr>
       <tr><th>目的端口</th><td>{{if .D.DstPortOp}}{{.D.DstPortOp}} {{.D.DstPortVal}}{{else}}—{{end}}</td></tr>
+      {{end}}
       <tr><th>申请理由</th><td>{{.D.Reason}}</td></tr>
       <tr><th>Plan SHA-256</th><td style="font-size:.78rem;word-break:break-all">{{.D.PlanSHA256}}</td></tr>
     </table>
