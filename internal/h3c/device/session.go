@@ -190,7 +190,7 @@ func (s *Session) EnterACLView(ctx context.Context) error {
 	if err != nil { return err }
 	if !aclViewPromptRe(s.aclNum).MatchString(out) {
 		return &SessionError{Stage: "view",
-			Cause: fmt.Errorf("prompt_mismatch: did not enter ACL %d view", s.aclNum)}
+			Cause: fmt.Errorf("prompt_mismatch: did not enter ACL %d view; the device sent %s", s.aclNum, quoteTail(out))}
 	}
 	return nil
 }
@@ -203,7 +203,7 @@ func (s *Session) execInACLView(ctx context.Context, cmd string) error {
 	out, err := s.ExecOutput(ctx, cmd, "]", ">")
 	if err != nil { return err }
 	if !aclViewPromptRe(s.aclNum).MatchString(out) {
-		return &SessionError{Stage: "view", Cause: fmt.Errorf("prompt_mismatch: left ACL view")}
+		return &SessionError{Stage: "view", Cause: fmt.Errorf("prompt_mismatch: left ACL view; the device sent %s", quoteTail(out))}
 	}
 	return checkDeviceErrors(out)
 }
@@ -325,10 +325,11 @@ func offendingLine(out, pattern string) string {
 }
 
 // quoteTail renders the last of what the device sent, Go-quoted so that the
-// control bytes that decide these questions are visible. Only the reads that
-// happen before the password goes out may use it: the auth phase is kept out of
-// the transcript and the stream for the same reason, and an error string ends up
-// in both.
+// control bytes that decide these questions are visible. It must not be used on
+// a read that could carry credential bytes: an error string reaches the
+// transcript and the browser stream, which the auth phase is deliberately kept
+// out of. The two login reads it is used on both happen before the password
+// goes out; the rest are device configuration output.
 func quoteTail(out string) string {
 	if out == "" { return "nothing at all" }
 	if len(out) > 200 { out = "..." + out[len(out)-200:] }
