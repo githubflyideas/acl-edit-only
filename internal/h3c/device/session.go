@@ -22,9 +22,13 @@ const (
 // happen to contain ">" or "]": those appear mid-line, never as the tail.
 //
 // What may precede the prompt is any of the bytes a device uses to get back to
-// the start of a line, not a newline alone. This switch punctuates lines with
-// CR NUL and redraws the prompt after a bare carriage return, so insisting on
-// "\n" made a perfectly normal prompt invisible and the login timed out.
+// the start of a line, not a newline alone. Insisting on "\n" was a guess about
+// what a device does between the last banner line and the prompt, and the
+// deployed switch pads its carriage returns with NUL, so the guess is not one
+// worth keeping. This is a widening only: every prompt the newline form matched
+// still matches. It was written while chasing a login timeout that turned out
+// not to be caused by it, and it is not evidence that any device behaves this
+// way.
 var rePrompt = regexp.MustCompile(`(?:^|[\n\r\x00])(?:<[^<>\n]{1,64}>|\[[^\[\]\n]{1,64}\])[ \t\r\x00]*\z`)
 
 // reMore matches the paging marker. Devices pad it differently, so the spacing
