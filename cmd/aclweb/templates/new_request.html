@@ -39,8 +39,8 @@
         <label>目的端口（可选）</label>
         <div style="display:flex;gap:8px">
           <select name="dst_port_op" style="width:150px">
+            <option value="eq" selected>等于（eq）</option>
             <option value="">— 不限端口 —</option>
-            <option value="eq">等于（eq）</option>
           </select>
           <input name="dst_port_val" type="number" min="1" max="65535" placeholder="端口号">
         </div>

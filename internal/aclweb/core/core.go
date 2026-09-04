@@ -99,6 +99,15 @@ func (r *SubmitRequest) normalize() {
 	if r.DstIP != "" && r.DstWildcard == "" {
 		r.DstWildcard = hostWildcard
 	}
+	// An operator with no port in mind is the common case, and the form now
+	// starts on "eq" so that typing a port is all that is needed. That makes an
+	// operator with no number next to it a normal thing to receive, and it means
+	// "no port condition" — not port 0, which is what an empty number field
+	// parses to and what the device would have been told to match.
+	if r.DstPortVal == 0 { r.DstPortOp = "" }
+	if r.SrcPortVal == 0 { r.SrcPortOp = "" }
+	if r.DstPortOp == "" { r.DstPortVal = 0 }
+	if r.SrcPortOp == "" { r.SrcPortVal = 0 }
 }
 
 // hostWildcard is the H3C wildcard for a single address.

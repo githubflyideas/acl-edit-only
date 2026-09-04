@@ -289,6 +289,13 @@ func fullFlow(t *testing.T, ruleComment bool) {
 	if !strings.Contains(detail, `<table class="sbs">`) {
 		t.Error("detail page does not render the side-by-side comparison")
 	}
+	// A rule wrapped onto a second line stops being one row of the comparison,
+	// and it wraps at a different place on each side, so the columns fall out of
+	// step. The table therefore never wraps and is scrolled instead, which needs
+	// the wrapper to be there.
+	if !strings.Contains(detail, `<div class="sbswrap">`) {
+		t.Error("the comparison is not inside its horizontal scroll wrapper")
+	}
 	if i := strings.Index(detail, html.EscapeString(wantLine)+"</td>"); i < 0 {
 		t.Errorf("the new rule is not in a table cell at all\n%s", snippet([]byte(detail)))
 	} else if cell := detail[max(0, i-30):i]; !strings.Contains(cell, `<td class="r">`) {
@@ -437,6 +444,23 @@ func TestDetailPageSurvivesMissingArtifacts(t *testing.T) {
 	}
 	if !strings.Contains(body, "REQ-19700101-9999") {
 		t.Errorf("detail page does not identify the request\n%s", snippet([]byte(body)))
+	}
+}
+
+// TestTheFormStartsOnEqualsPort keeps the two halves of the port default in
+// step: the form offering "eq" first and pre-selected only helps if a submission
+// carrying "eq" with no number still means no port condition, which core's
+// normalize handles. This checks the half a browser sees.
+func TestTheFormStartsOnEqualsPort(t *testing.T) {
+	h := newHarness(t, e2eRules(2))
+	h.login(t)
+	code, body := h.get(t, "/requests/new")
+	if code != http.StatusOK { t.Fatalf("GET the form = %d, want 200", code) }
+	if !strings.Contains(body, `<option value="eq" selected>`) {
+		t.Errorf("the port operator does not start on eq\n%s", snippet([]byte(body)))
+	}
+	if i, j := strings.Index(body, `<option value="eq"`), strings.Index(body, `<option value="">`); i > j {
+		t.Error("eq is not the first port option, so reordering could change the default")
 	}
 }
 
