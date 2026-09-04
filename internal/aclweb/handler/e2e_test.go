@@ -3,6 +3,7 @@ package handler_test
 import (
 	"html"
 	"bufio"
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -39,6 +40,7 @@ type harness struct {
 	srv  *httptest.Server
 	cli  *http.Client
 	db   *sql.DB
+	svc  *core.Service
 	pass string // initial admin password
 }
 
@@ -140,7 +142,7 @@ func newHarnessCfg(t *testing.T, rules []fakedev.Rule, ruleComment bool) *harnes
 		Jar: jar,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	return &harness{dev: dev, srv: srv, cli: cli, db: sqlDB, pass: adminPw}
+	return &harness{dev: dev, srv: srv, cli: cli, db: sqlDB, svc: svc, pass: adminPw}
 }
 
 func base64Std(s string) string {
@@ -659,4 +661,111 @@ func emptyACLFlow(t *testing.T, omitCount bool) {
 		t.Errorf("first rule allocated at %d, want %d — an empty ACL starts at the "+
 			"bottom of the window", rules[0].ID, e2eRangeMin)
 	}
+}
+
+// TestDeleteFlowEndToEnd covers the half of the tool that had never been
+// exercised end to end: taking a rule back out. The operator hit it on the
+// deployed system and got "database error" on the page the redirect landed on,
+// because a delete request describes a rule ID and writes none of the match
+// columns, and the detail page scanned those NULLs into strings.
+func TestDeleteFlowEndToEnd(t *testing.T) {
+	h := newHarness(t, e2eRules(5))
+	h.login(t)
+	tok := h.csrf(t)
+
+	// A rule has to exist before it can be taken back out, so the add flow runs
+	// first, in the short form: submit, then execute.
+	resp, err := h.cli.PostForm(h.srv.URL+"/requests/new", url.Values{
+		"csrf_token":   {tok},
+		"protocol":     {"tcp"},
+		"dst_ip":       {"10.99.1.7"},
+		"dst_wildcard": {"0.0.0.0"},
+		"dst_port_op":  {"eq"},
+		"dst_port_val": {"8443"},
+		"reason":       {"temporary access for the migration"},
+	})
+	if err != nil { t.Fatal(err) }
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("submit status %d, want 303\n%s", resp.StatusCode, snippet(body))
+	}
+	addID := strings.TrimPrefix(resp.Header.Get("Location"), "/requests/")
+	if term, done, sseErr := h.stream(t, addID, tok); sseErr != "" || !done {
+		t.Fatalf("adding the rule failed: %s\n--- terminal ---\n%s", sseErr, term)
+	}
+	ruleID := e2eRangeMin + 5
+	if !hasRule(h.dev.Rules(), ruleID) {
+		t.Fatalf("rule %d was never added; rules are %v", ruleID, h.dev.Rules())
+	}
+
+	// Now ask for it to be removed.
+	resp, err = h.cli.PostForm(h.srv.URL+"/requests/delete", url.Values{
+		"csrf_token": {tok},
+		"cr_id":      {addID},
+		"reason":     {"migration finished"},
+	})
+	if err != nil { t.Fatal(err) }
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("delete submit status %d, want 303\n%s", resp.StatusCode, snippet(body))
+	}
+	loc := resp.Header.Get("Location")
+
+	// This is where the deployed system stopped.
+	code, detail := h.get(t, loc)
+	if code != http.StatusOK {
+		t.Fatalf("GET the delete request at %s = %d, want 200\n%s", loc, code, snippet([]byte(detail)))
+	}
+	if !strings.Contains(detail, "delete_rule") {
+		t.Errorf("the page does not say this is a deletion\n%s", snippet([]byte(detail)))
+	}
+	// The diff must show the rule leaving, on the left-hand side.
+	if !strings.Contains(detail, `<table class="sbs">`) {
+		t.Error("the delete request has no comparison to approve against")
+	}
+	if !strings.Contains(detail, fmt.Sprintf("rule %d ", ruleID)) {
+		t.Errorf("the diff does not mention rule %d\n%s", ruleID, snippet([]byte(detail)))
+	}
+
+	delID := strings.TrimPrefix(loc, "/requests/")
+	term, done, sseErr := h.stream(t, delID, tok)
+	if sseErr != "" || !done {
+		t.Fatalf("delete dispatch failed: %s\n--- terminal ---\n%s", sseErr, term)
+	}
+	if !strings.Contains(term, fmt.Sprintf("undo rule %d", ruleID)) {
+		t.Errorf("the terminal never shows the rule being undone\n--- terminal ---\n%s", term)
+	}
+	if hasRule(h.dev.Rules(), ruleID) {
+		t.Errorf("rule %d is still on the device; rules are %v", ruleID, h.dev.Rules())
+	}
+
+	// Both requests end in a state that says what happened to them.
+	var addState, delState string
+	if err := h.db.QueryRow(`SELECT state FROM change_requests WHERE id=?`, addID).Scan(&addState); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db.QueryRow(`SELECT state FROM change_requests WHERE id=?`, delID).Scan(&delState); err != nil {
+		t.Fatal(err)
+	}
+	// A finished deletion is not an active rule, and neither is the rule it took
+	// away: leaving either row 'active' makes Reconcile report the rule it just
+	// removed as missing from the device on every later run.
+	if delState != "revoked" {
+		t.Errorf("the delete request ended in state %q, want revoked", delState)
+	}
+	if addState != "revoked" {
+		t.Errorf("the original request ended in state %q, want revoked", addState)
+	}
+	if err := h.svc.Reconcile(context.Background()); err != nil {
+		t.Errorf("reconcile complains after a completed deletion: %v", err)
+	}
+}
+
+func hasRule(rules []fakedev.Rule, id int) bool {
+	for _, r := range rules {
+		if r.ID == id { return true }
+	}
+	return false
 }

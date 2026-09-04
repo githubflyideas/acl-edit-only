@@ -306,11 +306,17 @@ func (s *Service) Dispatch(ctx context.Context, actor *auth.User, crID int64) er
 
 func (s *Service) handleDispatchFailure(
 	ctx context.Context, actor *auth.User,
-	crID int64, code string, ruleID int, preRaw string,
+	crID int64, code string, ruleID int, preRaw, action string,
 ) error {
-	// Try rollback.
-	rollbackResp, _ := s.runAgent(ctx, "rollback", "--request", code)
-	_ = rollbackResp
+	// Rollback means "undo rule N", which is the inverse of writing rule N and the
+	// action itself for a deletion. Running it after a failed delete would carry
+	// out the very change that did not go through, and the pre-state comparison
+	// below would then correctly report the device as no longer matching, so a
+	// deletion that never started was reported as needing manual intervention.
+	if action != "delete_rule" {
+		rollbackResp, _ := s.runAgent(ctx, "rollback", "--request", code)
+		_ = rollbackResp
+	}
 
 	// Post-rollback snapshot.
 	postRollbackRaw, _ := s.runSnapshot(ctx)
@@ -328,6 +334,9 @@ func (s *Service) handleDispatchFailure(
 	s.auditDirect(actor, "change_request", crID, "inconsistent", map[string]interface{}{
 		"rule_id": ruleID,
 	})
+	if action == "delete_rule" {
+		return fmt.Errorf("INCONSISTENT: the deletion reported failure but the ACL no longer matches the pre-dispatch state; manual intervention required")
+	}
 	return fmt.Errorf("INCONSISTENT: dispatch failed and rollback did not restore pre-state; manual intervention required")
 }
 
@@ -857,6 +866,24 @@ func verifyChange(preRaw, postRaw string, aclNum, ruleID int) error {
 	return nil
 }
 
+// verifyDeletion is verifyChange for the other direction: one rule fewer, the
+// rule gone, and nothing else touched. The three assertions are the same evidence
+// read the other way round, and assertion B is literally the same comparison,
+// since stripping the rule's own lines from both sides makes it symmetric.
+func verifyDeletion(preRaw, postRaw string, aclNum, ruleID int) error {
+	preCount, err := aclout.Count(preRaw, aclNum)
+	if err != nil { return fmt.Errorf("pre-change snapshot: %w", err) }
+	postCount, err := aclout.Count(postRaw, aclNum)
+	if err != nil { return fmt.Errorf("post-change snapshot: %w", err) }
+	if postCount != preCount-1 {
+		return fmt.Errorf("assertion A failed: pre count %d, post count %d", preCount, postCount)
+	}
+	if ruleExistsInSnapshot(postRaw, ruleID) {
+		return fmt.Errorf("assertion C failed: rule %d is still in the post-dispatch snapshot", ruleID)
+	}
+	return assertOnlyRuleChanged(preRaw, postRaw, ruleID)
+}
+
 func assertOnlyRuleChanged(preRaw, postRaw string, ruleID int) error {
 	pre := significantLines(preRaw, ruleID)
 	post := significantLines(postRaw, ruleID)
@@ -987,16 +1014,16 @@ func (s *Service) DispatchStream(ctx context.Context, actor *auth.User, crID int
 
 	var code string
 	var ruleID int
-	var planSHA, state string
+	var planSHA, state, action string
 	// Single-operator mode: a request may be executed straight from 'pending'
 	// after the operator has read the diff. The confirmation is still recorded
 	// below, so the audit trail is the same either way.
 	err := s.db.QueryRowContext(ctx, `
-		SELECT cr.request_code, cr.rule_id, cr.state, ca.plan_sha256
+		SELECT cr.request_code, cr.rule_id, cr.state, cr.action, ca.plan_sha256
 		FROM change_requests cr
 		JOIN change_artifacts ca ON ca.request_id = cr.id
 		WHERE cr.id=? AND cr.state IN ('pending','approved')`, crID,
-	).Scan(&code, &ruleID, &state, &planSHA)
+	).Scan(&code, &ruleID, &state, &action, &planSHA)
 	if err != nil {
 		return fmt.Errorf("request %d is not awaiting execution: %w", crID, err)
 	}
@@ -1089,12 +1116,29 @@ func (s *Service) DispatchStream(ctx context.Context, actor *auth.User, crID int
 	}
 
 	if runErr != nil || agentResp.Result != plan.ResultOK {
-		return s.handleDispatchFailure(ctx, actor, crID, code, ruleID, preRaw)
+		return s.handleDispatchFailure(ctx, actor, crID, code, ruleID, preRaw, action)
 	}
-	if err := verifyChange(preRaw, postRaw, s.cfg.ACL, ruleID); err != nil {
+	verify := verifyChange
+	if action == "delete_rule" { verify = verifyDeletion }
+	if err := verify(preRaw, postRaw, s.cfg.ACL, ruleID); err != nil {
 		s.auditDirect(actor, "change_request", crID, "verify_failed",
 			map[string]interface{}{"error": err.Error()})
-		return s.handleDispatchFailure(ctx, actor, crID, code, ruleID, preRaw)
+		return s.handleDispatchFailure(ctx, actor, crID, code, ruleID, preRaw, action)
+	}
+
+	if action == "delete_rule" {
+		// A finished deletion is not an active rule. Marking it 'active' would put a
+		// row carrying this rule ID into the set Reconcile expects to find on the
+		// device, so every later reconcile would report the rule it just removed as
+		// missing. The rule the deletion targeted stops being active at the same
+		// moment, for the same reason.
+		s.mustExec(ctx, `UPDATE change_requests SET state='revoked' WHERE id=?`, crID)
+		s.mustExec(ctx, `UPDATE change_requests SET state='revoked'
+			WHERE action='add_rule' AND rule_id=? AND state='active'`, ruleID)
+		s.auditDirect(actor, "change_request", crID, "revoked", map[string]interface{}{
+			"rule_id": ruleID, "plan_sha256": planSHA,
+		})
+		return nil
 	}
 
 	s.mustExec(ctx, `UPDATE change_requests SET state='active' WHERE id=?`, crID)
