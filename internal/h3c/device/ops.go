@@ -89,9 +89,39 @@ func Apply(ctx context.Context, s *Session, p *plan.Plan, _ time.Duration) error
 	return s.Save(ctx)
 }
 
-func Remove(ctx context.Context, s *Session, ruleID int) error {
+// GuardCheckExisting is the delete-side mirror of GuardCheck. For a deletion the
+// rule named by the plan must still be there and the ACL must hold exactly the
+// number of rules the plan was built against; "the rule already exists" is the
+// precondition here, not the hazard, so running the add guard would refuse every
+// deletion. Like the add guard it reads the ACL inside the write session, so the
+// state it checks is the state the next command acts on.
+func GuardCheckExisting(ctx context.Context, s *Session, ruleID, expectCount int) error {
+	out, err := s.DisplayACL(ctx)
+	if err != nil { return &SessionError{Stage: "view", Cause: fmt.Errorf("guard display: %w", err)} }
+	found := false
+	prefix := fmt.Sprintf("rule %d ", ruleID)
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), prefix) { found = true; break }
+	}
+	if !found {
+		return &SessionError{Stage: "view",
+			Cause: fmt.Errorf("guard_failed: rule %d is not in the ACL; nothing to delete", ruleID)}
+	}
+	count, err := aclout.Count(out, s.aclNum)
+	if err != nil {
+		return &SessionError{Stage: "view", Cause: fmt.Errorf("guard_failed: %w", err)}
+	}
+	if count != expectCount {
+		return &SessionError{Stage: "view",
+			Cause: fmt.Errorf("guard_failed: expected %d rules, got %d", expectCount, count)}
+	}
+	return nil
+}
+
+func Remove(ctx context.Context, s *Session, ruleID, expectCount int) error {
 	if err := s.EnterSystemView(ctx); err != nil { return err }
 	if err := s.EnterACLView(ctx); err != nil { return err }
+	if err := GuardCheckExisting(ctx, s, ruleID, expectCount); err != nil { return err }
 	if err := s.ExecUndoRule(ctx, BuildUndoRuleCmd(ruleID)); err != nil {
 		return &SessionError{Stage: "write", Cause: err}
 	}

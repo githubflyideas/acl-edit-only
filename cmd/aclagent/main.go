@@ -18,7 +18,7 @@ import (
 	"github.com/githubflyideas/acl-edit-only/internal/h3c/plan"
 )
 
-const agentVersion = "0.5.5"
+const agentVersion = "0.5.6"
 
 func main() {
 	if err := run(); err != nil {
@@ -144,9 +144,19 @@ func doApply(ctx context.Context, cfg *AgentConfig, password []byte, stream io.W
 	}
 	defer s.Close(ctx)
 	timeout := time.Duration(cfg.ReadTimeout) * time.Second
-	if err := device.Apply(ctx, s, p, timeout); err != nil {
-		writeFailResponse(cfg, resultFromSE(err), stageFromSE(err), sanitise(err.Error()))
-		return err
+	// A delete plan describes a rule ID and nothing else, so it cannot go through
+	// Apply, which starts by rendering a rule command out of match fields the plan
+	// deliberately does not carry.
+	var opErr error
+	switch p.Op {
+	case plan.OpDelete:
+		opErr = device.Remove(ctx, s, p.RuleID, p.ExpectCountBefore)
+	default:
+		opErr = device.Apply(ctx, s, p, timeout)
+	}
+	if opErr != nil {
+		writeFailResponse(cfg, resultFromSE(opErr), stageFromSE(opErr), sanitise(opErr.Error()))
+		return opErr
 	}
 	writeResponse(cfg, plan.Response{Result: plan.ResultOK, Stage: plan.StageSave, Raw: s.RawOutput()})
 	return nil
@@ -275,7 +285,16 @@ func loadAndVerifyPlan(cfg *AgentConfig, reqID, wantSHA string) (*plan.Plan, err
 	return &p, dec.Decode(&p)
 }
 
+// absoluteGuard holds the limits the agent enforces on its own, whatever the plan
+// asks for. The breadth checks below only mean something for a rule being written:
+// a delete plan carries no protocol, no source and no destination, so judging it
+// by those fields read "both src and dst are any" and refused every deletion. What
+// bounds a deletion is the rule ID window, which ValidateForAgent has already
+// checked by the time this runs.
 func absoluteGuard(p *plan.Plan) error {
+	if p.Op != plan.OpAdd {
+		return plan.ValidateComment(p.Comment)
+	}
 	if strings.ToLower(p.Protocol) == "ip" {
 		return fmt.Errorf("guard_failed: permit ip not allowed; use tcp/udp/icmp")
 	}
