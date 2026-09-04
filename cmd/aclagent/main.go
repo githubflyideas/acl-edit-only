@@ -29,9 +29,17 @@ func main() {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return fmt.Errorf("usage: acl-agent <snapshot|apply|rollback> [flags]")
+		return fmt.Errorf("usage: acl-agent <snapshot|apply|rollback|version> [flags]")
 	}
 	subcmd := os.Args[1]
+	// Asking a binary which build it is has to work without a config file, a
+	// credential or a reachable switch: the question comes up exactly when
+	// something else is broken and the first thing to rule out is that an older
+	// copy is still on the path.
+	if subcmd == "version" || subcmd == "-version" || subcmd == "--version" {
+		fmt.Println("acl-agent", agentVersion)
+		return nil
+	}
 	switch subcmd {
 	case "snapshot", "apply", "rollback":
 	default:
