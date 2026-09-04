@@ -57,6 +57,17 @@ type Device struct {
 	// some H3C models and restricted privilege levels do.
 	NoScreenLength bool
 
+	// ACLViewPromptPlain makes the prompt inside ACL view stay [hostname]
+	// instead of naming the view. Whether a given Comware build renames the
+	// prompt is not something this project can settle from documentation, and a
+	// device that does not rename it must still be usable.
+	ACLViewPromptPlain bool
+
+	// ACLViewDisplayThisACL, when non-zero, is the ACL number "display this"
+	// claims to be showing. It exists to model the case the prompt check is
+	// there to catch: the session is in some other ACL's view.
+	ACLViewDisplayThisACL int
+
 	// LoginPromptText is the word the device uses to ask who is connecting.
 	// Comware prints "Username:" on some versions and "login:" on others, and
 	// which one you get also depends on how the vty is authenticated, so both

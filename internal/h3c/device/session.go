@@ -49,6 +49,27 @@ func aclViewPromptRe(aclNum int) *regexp.Regexp {
 	return regexp.MustCompile(fmt.Sprintf(`\[.*-acl-ipv4-adv-%d\]`, aclNum))
 }
 
+// aclViewNumberedRe matches a prompt that names the ACL some other way than
+// Comware 7 does — "-acl-adv-N" on older builds, for instance. What has to be
+// there is the number: the check exists to confirm which ACL the session is in,
+// not to confirm the wording.
+func aclViewNumberedRe(aclNum int) *regexp.Regexp {
+	return regexp.MustCompile(fmt.Sprintf(`\[[^\[\]\n]*\b%d\][ \t\r\x00]*\z`, aclNum))
+}
+
+// reDisplayThisACL matches the line "display this" prints to say which ACL the
+// view belongs to. Comware writes "acl number N", "acl advanced N" and
+// "acl ipv4 advanced N" depending on build.
+func reDisplayThisACL(aclNum int) *regexp.Regexp {
+	return regexp.MustCompile(fmt.Sprintf(`(?im)^\s*acl\s+(?:ipv4\s+)?(?:number|advanced|basic)?\s*%d\b`, aclNum))
+}
+
+// trailingPrompt returns the prompt sitting at the end of the output, or "".
+func trailingPrompt(out string) string {
+	m := rePrompt.FindString(out)
+	return strings.Trim(m, " \t\r\n\x00")
+}
+
 type Session struct {
 	stream io.Writer
 	// wire, when set, receives every chunk read from the device exactly as it
@@ -63,6 +84,8 @@ type Session struct {
 	timeout time.Duration
 	rawBuf  strings.Builder
 	inAuth  bool
+	// aclPrompt is the prompt the device showed once ACL view was established.
+	aclPrompt string
 }
 
 func NewSession(tr Transport, cfg DialConfig, auth *Auth, aclNum int, readTimeout time.Duration) *Session {
@@ -185,13 +208,31 @@ func (s *Session) EnterSystemView(ctx context.Context) error {
 	return s.Exec(ctx, "system-view", promptSysView)
 }
 
+// EnterACLView enters the ACL's view and then establishes, by whatever evidence
+// the device offers, that this really is ACL s.aclNum's view. A prompt naming
+// the view is the cheapest evidence; a prompt naming only the host is not
+// evidence at all, and there "display this" is asked instead, because entering
+// the wrong ACL is the one mistake this check exists to prevent. Once settled,
+// the exact prompt is remembered so every later command in the session can be
+// held to it without asking again.
 func (s *Session) EnterACLView(ctx context.Context) error {
 	out, err := s.ExecOutput(ctx, fmt.Sprintf("acl advanced %d", s.aclNum), "]")
 	if err != nil { return err }
-	if !aclViewPromptRe(s.aclNum).MatchString(out) {
-		return &SessionError{Stage: "view",
-			Cause: fmt.Errorf("prompt_mismatch: did not enter ACL %d view; the device sent %s", s.aclNum, quoteTail(out))}
+	if aclViewPromptRe(s.aclNum).MatchString(out) || aclViewNumberedRe(s.aclNum).MatchString(out) {
+		s.aclPrompt = trailingPrompt(out)
+		return nil
 	}
+	if trailingPrompt(out) == "" {
+		return &SessionError{Stage: "view",
+			Cause: fmt.Errorf("prompt_mismatch: no prompt after entering ACL %d view; the device sent %s", s.aclNum, quoteTail(out))}
+	}
+	conf, err := s.ExecOutput(ctx, "display this", "]")
+	if err != nil { return err }
+	if !reDisplayThisACL(s.aclNum).MatchString(conf) {
+		return &SessionError{Stage: "view",
+			Cause: fmt.Errorf("view_mismatch: the prompt does not name a view and \"display this\" does not show ACL %d; the device sent %s", s.aclNum, quoteTail(conf))}
+	}
+	s.aclPrompt = trailingPrompt(conf)
 	return nil
 }
 
@@ -202,8 +243,13 @@ func (s *Session) ExecUndoRule(ctx context.Context, cmd string) error { return s
 func (s *Session) execInACLView(ctx context.Context, cmd string) error {
 	out, err := s.ExecOutput(ctx, cmd, "]", ">")
 	if err != nil { return err }
-	if !aclViewPromptRe(s.aclNum).MatchString(out) {
-		return &SessionError{Stage: "view", Cause: fmt.Errorf("prompt_mismatch: left ACL view; the device sent %s", quoteTail(out))}
+	// The prompt settled at entry is the one that has to come back. Comparing
+	// against it rather than against a pattern is what keeps the relaxed entry
+	// check honest: whatever evidence was accepted then, a command that changed
+	// view afterwards still shows up as a different prompt.
+	if got := trailingPrompt(out); got != s.aclPrompt {
+		return &SessionError{Stage: "view", Cause: fmt.Errorf(
+			"prompt_mismatch: left ACL view; prompt was %q, now %q; the device sent %s", s.aclPrompt, got, quoteTail(out))}
 	}
 	return checkDeviceErrors(out)
 }

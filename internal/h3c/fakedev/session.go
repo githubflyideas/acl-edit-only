@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -119,6 +120,14 @@ func (s *conn) handle(cmd string) bool {
 		s.view = "acl"
 		return false
 
+	case cmd == "display this" || cmd == "dis this":
+		if s.view != "acl" {
+			s.errUnrecognized()
+			return false
+		}
+		s.displayThis()
+		return false
+
 	case strings.HasPrefix(cmd, "display acl "):
 		n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(cmd, "display acl ")))
 		if err != nil {
@@ -169,6 +178,28 @@ func (s *conn) handle(cmd string) bool {
 	}
 	s.errUnrecognized()
 	return false
+}
+
+// displayThis prints the ACL view's own configuration, the way "display this"
+// does. It is the only positive evidence of which view a session is in when the
+// prompt does not carry the ACL number.
+func (s *conn) displayThis() {
+	d := s.d
+	num := d.ACL
+	if d.ACLViewDisplayThisACL != 0 { num = d.ACLViewDisplayThisACL }
+	s.out("\r\n#\r\n")
+	s.out(fmt.Sprintf("acl number %d\r\n", num))
+	d.mu.Lock()
+	ids := make([]int, 0, len(d.rules))
+	for id := range d.rules { ids = append(ids, id) }
+	sort.Ints(ids)
+	for _, id := range ids {
+		r := d.rules[id]
+		s.out(fmt.Sprintf(" rule %d %s\r\n", id, r.Body))
+		if r.Comment != "" { s.out(fmt.Sprintf(" rule %d comment %s\r\n", id, r.Comment)) }
+	}
+	d.mu.Unlock()
+	s.out("#\r\nreturn\r\n")
 }
 
 func (s *conn) ruleCmd(rest string) {
@@ -271,6 +302,10 @@ func (s *conn) prompt() {
 	case "system":
 		s.out(fmt.Sprintf("[%s]", s.d.Hostname))
 	case "acl":
+		if s.d.ACLViewPromptPlain {
+			s.out(fmt.Sprintf("[%s]", s.d.Hostname))
+			return
+		}
 		s.out(fmt.Sprintf("[%s-acl-ipv4-adv-%d]", s.d.Hostname, s.d.ACL))
 	default:
 		s.out(fmt.Sprintf("<%s>", s.d.Hostname))
