@@ -296,10 +296,10 @@ func fullFlow(t *testing.T, ruleComment bool) {
 	if !strings.Contains(detail, `<div class="sbswrap">`) {
 		t.Error("the comparison is not inside its horizontal scroll wrapper")
 	}
-	// Copying the terminal record must not depend on navigator.clipboard, which
-	// does not exist over plain HTTP — the deployment this tool is written for.
-	if !strings.Contains(detail, "execCommand('copy')") {
-		t.Error("the copy button has no path that works outside a secure context")
+	// No copy button: it could not be made to work reliably over plain HTTP, and
+	// one that silently does nothing costs more than selecting the text by hand.
+	if strings.Contains(detail, "copyTerminal") {
+		t.Error("the copy button is back")
 	}
 	if i := strings.Index(detail, html.EscapeString(wantLine)+"</td>"); i < 0 {
 		t.Errorf("the new rule is not in a table cell at all\n%s", snippet([]byte(detail)))
