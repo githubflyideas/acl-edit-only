@@ -18,7 +18,7 @@ import (
 	"github.com/githubflyideas/acl-edit-only/internal/h3c/plan"
 )
 
-const agentVersion = "0.5.2"
+const agentVersion = "0.5.3"
 
 func main() {
 	if err := run(); err != nil {
